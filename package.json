@@ -1,0 +1,29 @@
+{
+  "name": "subfit-ai",
+  "version": "1.1.0",
+  "description": "find the plan that fits your usage — compare Claude Code token consumption with OpenAI Codex pricing and subscription tiers.",
+  "type": "module",
+  "bin": {
+    "subfit-ai": "./subfit-ai.ts"
+  },
+  "scripts": {
+    "start": "tsx subfit-ai.ts"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "openai",
+    "codex",
+    "tokens",
+    "cost",
+    "pricing",
+    "subscription",
+    "usage",
+    "planfit",
+    "subfit"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  }
+}
