@@ -21,6 +21,10 @@
     "claude-enterprise": { "label": "Claude Enterprise", "monthlyUsd": null, "messagesPer5h": null,        "sessionsCap": null, "note": "custom pricing, unlimited" },
     "openai-plus":       { "label": "OpenAI Plus",       "monthlyUsd": 20,   "messagesPer5h": [10, 60],    "sessionsCap": null, "note": "Codex cloud tasks / 5h; GPT-5.4 local 20-100 / 5h — unverified, check openai.com/pricing", "_source": "https://openai.com/pricing" },
     "openai-pro":        { "label": "OpenAI Pro",        "monthlyUsd": 100,  "messagesPer5h": [50, 300],   "sessionsCap": null, "note": "Codex cloud tasks / 5h; GPT-5.4 local 100-500 / 5h — unverified, check openai.com/pricing", "_source": "https://openai.com/pricing" },
-    "openai-pro-20":     { "label": "OpenAI Pro 20x",    "monthlyUsd": 200,  "messagesPer5h": [200, 1200], "sessionsCap": null, "note": "Codex cloud tasks / 5h; GPT-5.4 local 400-2000 / 5h — unverified, check openai.com/pricing", "_source": "https://openai.com/pricing" }
+    "openai-pro-20":     { "label": "OpenAI Pro 20x",    "monthlyUsd": 200,  "messagesPer5h": [200, 1200], "sessionsCap": null, "note": "Codex cloud tasks / 5h; GPT-5.4 local 400-2000 / 5h — unverified, check openai.com/pricing", "_source": "https://openai.com/pricing" },
+    "mistral-free":       { "label": "Mistral Free",       "monthlyUsd": 0,    "messagesPer5h": [6, null],   "sessionsCap": null, "note": "6 free messages, 5 web searches, 30 think mode, 5 deep research, 5 code interpreter per day", "_source": "https://mistral.ai/pricing" },
+    "mistral-pro":        { "label": "Mistral Pro",        "monthlyUsd": 15,   "messagesPer5h": null,        "sessionsCap": null, "note": "Vibe for all-day coding (pay-as-you-go beyond), 1000 memories, 15GB storage", "_source": "https://mistral.ai/pricing" },
+    "mistral-team":       { "label": "Mistral Team",       "monthlyUsd": 25,   "messagesPer5h": null,        "sessionsCap": null, "note": "$24.99/user/mo, 30GB storage/user, domain verification", "_source": "https://mistral.ai/pricing" },
+    "mistral-enterprise": { "label": "Mistral Enterprise", "monthlyUsd": null, "messagesPer5h": null,        "sessionsCap": null, "note": "Custom pricing, private deployments", "_source": "https://mistral.ai/pricing" }
   }
 }

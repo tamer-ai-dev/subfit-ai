@@ -371,6 +371,22 @@ scanner to read other tools' session formats) are welcome.
 | Gemini 2.5 Flash | 0.30 | 2.50 | — |
 | Gemini 2.5 Flash-Lite | 0.10 | 0.40 | — |
 
+**Mistral Vibe** — source: `mistral.ai/pricing`. Vibe runs Devstral
+models via the Mistral API; the CLI wires them through subscription
+tiers.
+
+| Model | Input $/1M | Output $/1M |
+| --- | ---: | ---: |
+| Devstral 2 (123B) | 0.40 | 2.00 |
+| Devstral Small 2 (24B) | 0.10 | 0.30 |
+
+| Plan | Price / month | Notes |
+| --- | ---: | --- |
+| Mistral Free       | **$0**       | 6 free messages / day, 5 web searches, 30 think mode, 5 deep research, 5 code interpreter |
+| Mistral Pro        | **$14.99**   | Vibe for all-day coding (pay-as-you-go beyond), 1000 memories, 15 GB storage |
+| Mistral Team       | **$24.99**/user | 30 GB / user, domain verification |
+| Mistral Enterprise | **custom**   | Private deployments |
+
 **OpenCode** — source: `opencode.ai`. BYOK-first (bring your own API
 keys), no proprietary token rates. Two first-party offerings exist
 alongside BYOK:
