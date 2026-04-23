@@ -290,18 +290,27 @@ function fileTooLarge(filePath: string): boolean {
   return true;
 }
 
-/** Walk root recursively, return every *.jsonl file path. Guards against cycles and unreadable dirs. */
+/** Maximum directory depth for recursive scans. A real `~/.claude` tree is
+ *  only a few levels deep (projects/<slug>/sessionId.jsonl), so 10 levels
+ *  is well past any legitimate layout. Deeper paths are skipped to prevent
+ *  unbounded traversal from symlink loops or poisoned directory trees. */
+const MAX_SCAN_DEPTH = 10;
+
+/** Walk root recursively, return every *.jsonl file path. Guards against
+ *  cycles, unreadable dirs, and traversal explosions (MAX_SCAN_DEPTH). */
 export function findJsonlFiles(root: string): string[] {
   const files: string[] = [];
   if (!existsSync(root)) return files;
 
   const seen = new Set<string>();
-  const stack: string[] = [root];
+  const stack: Array<[string, number]> = [[root, 0]];
+  let depthExceeded = false;
 
   while (stack.length > 0) {
-    const dir = stack.pop()!;
+    const [dir, depth] = stack.pop()!;
     if (seen.has(dir)) continue;
     seen.add(dir);
+    if (depth > MAX_SCAN_DEPTH) { depthExceeded = true; continue; }
 
     let st;
     try { st = statSync(dir); } catch { continue; }
@@ -321,9 +330,12 @@ export function findJsonlFiles(root: string): string[] {
       const p = join(dir, name);
       let sub;
       try { sub = statSync(p); } catch { continue; }
-      if (sub.isDirectory()) stack.push(p);
+      if (sub.isDirectory()) stack.push([p, depth + 1]);
       else if (sub.isFile() && name.endsWith(".jsonl")) files.push(p);
     }
+  }
+  if (depthExceeded) {
+    process.stderr.write(`subfit-ai: scan depth cap (${MAX_SCAN_DEPTH}) reached under ${root}; deeper directories skipped\n`);
   }
   return files;
 }
@@ -515,7 +527,11 @@ function scanJsonl(filePath: string, ctx: ScanContext): void {
 
 /** Walk the Gemini CLI root and return every `session-*.json` file under
  *  `tmp/<slug>/chats/`. Returns an empty list if `root` doesn't exist so
- *  callers can skip Gemini silently when the CLI was never installed. */
+ *  callers can skip Gemini silently when the CLI was never installed.
+ *
+ *  Traversal is fixed-depth (root → tmp → slug → chats → file = 4 levels),
+ *  well under MAX_SCAN_DEPTH, so no explicit depth cap is enforced here —
+ *  the layout itself bounds the walk. */
 export function findGeminiSessions(root: string): string[] {
   const files: string[] = [];
   if (!existsSync(root)) return files;
