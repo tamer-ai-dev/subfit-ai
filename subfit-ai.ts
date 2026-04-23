@@ -119,6 +119,8 @@ export function loadConfig(explicitPath?: string): { config: CostCompareConfig; 
 
 interface Args {
   path: string;
+  /** Root to scan for Gemini CLI sessions (~/.gemini by default). Skipped silently if missing. */
+  geminiPath: string;
   json: boolean;
   help: boolean;
   monthly: boolean;
@@ -150,6 +152,7 @@ const DEFAULT_EXPORT_PATH = "subfit-report.md";
 function parseArgs(argv: string[]): Args {
   const args: Args = {
     path: join(homedir(), ".claude"),
+    geminiPath: join(homedir(), ".gemini"),
     json: false,
     help: false,
     monthly: true,
@@ -168,6 +171,8 @@ function parseArgs(argv: string[]): Args {
     else if (a === "--no-monthly") args.monthly = false;
     else if (a === "--path") args.path = argv[++i] ?? args.path;
     else if (a.startsWith("--path=")) args.path = a.slice("--path=".length);
+    else if (a === "--gemini-path") args.geminiPath = argv[++i] ?? args.geminiPath;
+    else if (a.startsWith("--gemini-path=")) args.geminiPath = a.slice("--gemini-path=".length);
     else if (a === "--config") args.config = argv[++i] ?? null;
     else if (a.startsWith("--config=")) args.config = a.slice("--config=".length);
     else if (a === "--export") {
@@ -195,6 +200,10 @@ USAGE
 OPTIONS
   --path <dir>    Root directory holding Claude JSONL sessions (default: ~/.claude).
                   Scanned RECURSIVELY — every *.jsonl at any depth is considered.
+  --gemini-path <dir>
+                  Root directory holding Gemini CLI sessions (default: ~/.gemini).
+                  Scans tmp/<slug>/chats/session-*.json. Skipped silently if the
+                  directory does not exist.
   --config <file> Path to a pricing/plan-limits JSON (default:
                   <script-dir>/config.json; falls back to built-in defaults
                   if the file is missing or malformed).
@@ -1023,16 +1032,23 @@ function main(): number {
   // --demo overrides --path with the bundled sample fixture.
   if (args.demo) args.path = join(scriptDir(), "examples");
 
-  if (!existsSync(args.path)) {
-    process.stderr.write(`subfit-ai: path not found: ${args.path}\n`);
-    process.stderr.write(`  (use --path to point somewhere else, or --help)\n`);
+  // Abort only when NEITHER provider root exists — Gemini is opt-in, so a
+  // Claude-less machine with ~/.gemini present should still work.
+  const claudeExists = existsSync(args.path);
+  const geminiExists = existsSync(args.geminiPath);
+  if (!claudeExists && !geminiExists) {
+    process.stderr.write(`subfit-ai: neither path exists\n`);
+    process.stderr.write(`  --path         ${args.path}\n`);
+    process.stderr.write(`  --gemini-path  ${args.geminiPath}\n`);
+    process.stderr.write(`  (use --path / --gemini-path to point somewhere else, or --help)\n`);
     return 1;
   }
 
   const { config, source: configSource } = loadConfig(args.config ?? undefined);
   const { pricing, planLimits } = config;
 
-  const files = findJsonlFiles(args.path);
+  const files = claudeExists ? findJsonlFiles(args.path) : [];
+  const geminiFiles = geminiExists ? findGeminiSessions(args.geminiPath) : [];
   const ctx: ScanContext = {
     byModel: new Map(),
     byMonth: new Map(),
@@ -1041,6 +1057,7 @@ function main(): number {
     unknownModels: new Set(),
   };
   for (const f of files) scanJsonl(f, ctx);
+  for (const f of geminiFiles) scanGeminiSession(f, ctx);
 
   // M1 — warn when model strings didn't match any known bucket (bucketed as Opus).
   if (ctx.unknownModels.size > 0) {
@@ -1054,8 +1071,8 @@ function main(): number {
     ctx.assistantLines,
     ctx.minTs,
     ctx.maxTs,
-    files.length,        // 1 JSONL file ≈ 1 Claude session
-    ctx.byMonth.size,    // distinct YYYY-MM buckets with data
+    files.length + geminiFiles.length,  // session ≈ 1 Claude JSONL + 1 Gemini session file
+    ctx.byMonth.size,                   // distinct YYYY-MM buckets with data
   );
   // M2 — subscription verdicts also surfaced in JSON output.
   const subscriptionVerdicts = Object.fromEntries(
@@ -1088,8 +1105,10 @@ function main(): number {
   if (args.json) {
     const payload = {
       path: args.path,
+      geminiPath: args.geminiPath,
       configSource,
       filesScanned: files.length,
+      geminiSessionsScanned: geminiFiles.length,
       dateRange: { first: ctx.minTs, last: ctx.maxTs },
       stats: {
         totalLines: ctx.totalLines,
@@ -1137,7 +1156,12 @@ function main(): number {
   const lastDate = ctx.maxTs ? ctx.maxTs.slice(0, 10) : "n/a";
 
   const out: string[] = [];
-  out.push(`Scanned ${files.length} JSONL file(s) under ${args.path}`);
+  out.push(`Scanned ${files.length} Claude JSONL file(s) under ${args.path}`);
+  if (geminiFiles.length > 0) {
+    out.push(`  + ${geminiFiles.length} Gemini session file(s) under ${args.geminiPath}`);
+  } else if (existsSync(args.geminiPath)) {
+    out.push(`  + 0 Gemini session files found under ${args.geminiPath}`);
+  }
   out.push(`  config: ${configSource === "fallback" ? "embedded defaults" : configSource}`);
   out.push(`  lines: ${ctx.totalLines.toLocaleString()}  assistant: ${ctx.assistantLines.toLocaleString()}  with-usage: ${ctx.withUsage.toLocaleString()}  parse-errors: ${ctx.parseErrors}`);
   out.push(`  date range: ${firstDate} → ${lastDate}`);
