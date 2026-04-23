@@ -1,39 +1,39 @@
-# Security audit codex
+# Codex security audit
 
 ## Findings
 
-1. **`docker build` exfiltration footgun: repo ships Docker instructions but no `.dockerignore`.**
-   Réf: [Dockerfile](Dockerfile:5), [Dockerfile](Dockerfile:18), [README.md](README.md:97), [README.md](README.md:118).
-   Vous invitez explicitement les gens à faire `docker build -t subfit-ai .`, mais repo n'a pas de `.dockerignore`. Conséquence: Docker envoie tout le contexte local au daemon/builder avant même d'appliquer les `COPY`. Dans ce workspace il y a déjà des dotdirs et artefacts locaux (`.claude/`, `.codex`, `.opencode/`, `logs/`, fichiers de review non commités). En local avec buildkit distant, builder cloud, ou CI bricolée, ça devient fuite de données triviale. Sur HN, quelqu'un va tester, builder sur machine sale, puis découvrir que l'outil "offline" a envoyé son contexte perso au build.
+1. **`docker build` exfiltration footgun: the repo ships Docker instructions but no `.dockerignore`.**
+   Refs: [Dockerfile](Dockerfile:5), [Dockerfile](Dockerfile:18), [README.md](README.md:97), [README.md](README.md:118).
+   You explicitly invite people to run `docker build -t subfit-ai .`, but the repo has no `.dockerignore`. Consequence: Docker sends the entire local build context to the daemon / builder before any `COPY` is applied. In this workspace there are already dotdirs and local artefacts (`.claude/`, `.codex`, `.opencode/`, `logs/`, uncommitted review files). On a remote buildkit, cloud builder, or a hacked-together CI, this becomes a trivial data leak. On HN someone will try it on a dirty machine and then discover that the "offline" tool shipped their personal context to the build.
 
-2. **DoS mémoire facile: chaque fichier d'entrée est chargé entièrement en RAM.**
-   Réf: [subfit-ai.ts](subfit-ai.ts:424), [subfit-ai.ts](subfit-ai.ts:429), [subfit-ai.ts](subfit-ai.ts:526), [subfit-ai.ts](subfit-ai.ts:533), [subfit-ai.ts](subfit-ai.ts:102), [subfit-ai.ts](subfit-ai.ts:261).
-   `scanJsonl()` fait `readFileSync(..., "utf-8")` puis `split("\n")`. `scanGeminiSession()` fait pareil sur le JSON complet. `loadConfig()` aussi. Aucun plafond de taille, aucun streaming, aucun timeout, aucune limite de nombre de fichiers. Un dossier malveillant ou juste énorme peut faire exploser mémoire CPU sans effort. Ce n'est pas RCE, mais pour un CLI que des inconnus vont pull après HN, c'est le bug "ça freeze / ça crashe mon laptop" tout trouvé.
+2. **Easy memory DoS: every input file is loaded fully into RAM.**
+   Refs: [subfit-ai.ts](subfit-ai.ts:424), [subfit-ai.ts](subfit-ai.ts:429), [subfit-ai.ts](subfit-ai.ts:526), [subfit-ai.ts](subfit-ai.ts:533), [subfit-ai.ts](subfit-ai.ts:102), [subfit-ai.ts](subfit-ai.ts:261).
+   `scanJsonl()` does `readFileSync(..., "utf-8")` then `split("\n")`. `scanGeminiSession()` does the same on the whole JSON. `loadConfig()` too. No size cap, no streaming, no timeout, no file-count limit. A hostile or just oversized directory can blow up memory and CPU with no effort. Not an RCE, but for a CLI that strangers will pull after HN, it is the classic "this freezes / crashes my laptop" bug.
 
-3. **Injection terminal/log via `model` non reconnu provenant des fichiers scannés.**
-   Réf: [subfit-ai.ts](subfit-ai.ts:442), [subfit-ai.ts](subfit-ai.ts:545), [subfit-ai.ts](subfit-ai.ts:1231), [subfit-ai.ts](subfit-ai.ts:1236).
-   Les IDs de modèles inconnus sont repris tels quels depuis JSONL / JSON puis réémis sur `stderr`. Si un fichier crafté contient des retours ligne, séquences ANSI, OSC 8, etc., sortie terminal peut être polluée, maquillée, ou rendre liens/couleurs trompeurs. Impact limité à terminal injection locale, pas exécution de code, mais c'est exactement le genre de demo embarrassante qu'un lecteur HN peut poster en capture.
+3. **Terminal / log injection via unrecognized `model` strings coming from scanned files.**
+   Refs: [subfit-ai.ts](subfit-ai.ts:442), [subfit-ai.ts](subfit-ai.ts:545), [subfit-ai.ts](subfit-ai.ts:1231), [subfit-ai.ts](subfit-ai.ts:1236).
+   Unknown model IDs are taken verbatim from the JSONL / JSON and re-emitted on `stderr`. If a crafted file carries newlines, ANSI sequences, OSC 8, etc., the terminal output can be polluted, disguised, or made to render misleading links / colours. Impact is limited to local terminal injection, not code execution, but it is exactly the kind of embarrassing demo that an HN reader can post as a screenshot.
 
-4. **`--export` autorise overwrite arbitraire de n'importe quel fichier writable.**
-   Réf: [subfit-ai.ts](subfit-ai.ts:178), [subfit-ai.ts](subfit-ai.ts:185), [subfit-ai.ts](subfit-ai.ts:1310), [subfit-ai.ts](subfit-ai.ts:1320), [subfit-ai.ts](subfit-ai.ts:1347).
-   Techniquement, ce n'est pas une path traversal "exploit" puisqu'utilisateur choisit le chemin. Mais en pratique c'est un clobber sans garde: `--export ~/.bashrc`, `--export package.json`, `--export ../README.md` écrase tout avec simple warning. Si plus tard quelqu'un wrappe ce binaire dans une UI/web wrapper naïve, ça devient primitive d'écriture immédiate.
+4. **`--export` allows arbitrary overwrite of any writable file.**
+   Refs: [subfit-ai.ts](subfit-ai.ts:178), [subfit-ai.ts](subfit-ai.ts:185), [subfit-ai.ts](subfit-ai.ts:1310), [subfit-ai.ts](subfit-ai.ts:1320), [subfit-ai.ts](subfit-ai.ts:1347).
+   Technically this is not a "path traversal" exploit since the user picks the path. But in practice it is a clobber with no guard: `--export ~/.bashrc`, `--export package.json`, `--export ../README.md` overwrite anything with just a warning. If someone later wraps this binary in a naive UI or web shim, it instantly becomes a write primitive.
 
-5. **Parser récursif sans bornes sur `--path` / `--gemini-path`: un répertoire massif ou monté bizarrement peut rendre l'outil inutilisable.**
-   Réf: [subfit-ai.ts](subfit-ai.ts:257), [subfit-ai.ts](subfit-ai.ts:264), [subfit-ai.ts](subfit-ai.ts:278), [subfit-ai.ts](subfit-ai.ts:481), [README.md](README.md:131).
-   `findJsonlFiles()` et `findGeminiSessions()` marchent sans quotas ni filtres de profondeur. Vous évitez quelques répertoires de bruit au top-level, rien de plus. Sur chemin pointant par erreur vers `$HOME`, mount réseau, dump géant, ou arbre rempli de milliers de fichiers, utilisateur mange scan potentiellement énorme. Pas vulnérabilité serveur, mais mauvais profil de robustesse pour tool grand public.
+5. **Unbounded recursive parser on `--path` / `--gemini-path`: a massive or weirdly mounted directory can render the tool unusable.**
+   Refs: [subfit-ai.ts](subfit-ai.ts:257), [subfit-ai.ts](subfit-ai.ts:264), [subfit-ai.ts](subfit-ai.ts:278), [subfit-ai.ts](subfit-ai.ts:481), [README.md](README.md:131).
+   `findJsonlFiles()` and `findGeminiSessions()` walk with no quotas and no depth filters. You skip a few top-level noise directories, nothing more. If a path points by mistake at `$HOME`, a network mount, a huge dump, or a tree full of thousands of files, the user eats a potentially enormous scan. Not a server-side vulnerability, but poor robustness for a public-facing tool.
 
-6. **Message "offline" vrai pour runtime, moins vrai pour supply chain / image build.**
-   Réf: [README.md](README.md:31), [CLAUDE.md](CLAUDE.md:54), [Dockerfile](Dockerfile:16).
-   Le projet se vend "no network call". Côté exécution du script, oui. Mais Docker fait `npm install -g tsx@4` au build, donc build non reproductible sans pin digest ni verrou, et pas du tout "offline". Même sujet pour `npx tsx` côté usage. Ce n'est pas une faille applicative directe, mais publiquement ça ouvre angle d'attaque "offline sauf quand il télécharge du code". Sur HN, quelqu'un va le pointer.
+6. **The "offline" claim holds for runtime but is less accurate for the supply chain / image build.**
+   Refs: [README.md](README.md:31), [CLAUDE.md](CLAUDE.md:54), [Dockerfile](Dockerfile:16).
+   The project sells itself as "no network call". For script execution, yes. But the Dockerfile does `npm install -g tsx@4` at build time, so the build is non-reproducible without a pinned digest / lockfile, and it is not "offline" at all. Same story for `npx tsx` on the usage side. Not a direct application flaw, but it publicly opens the "offline except when it downloads code" angle. On HN someone will call it out.
 
-## Données perso / trucs embarrassants
+## Personal data / embarrassing bits
 
-- Dans les fichiers commités que j'ai lus: pas de clé API, token, secret, email perso, ni dump de session réel. `examples/sample.jsonl` a l'air synthétique.
-- `config.json` ne contient que URLs publiques de pricing. Rien de sensible.
-- `.git/config` local contient `git@github.com:tamer-ai-dev/planfit.git` et `[email protected]`, mais ce n'est pas versionné. Pas un problème de repo public en soi.
-- `.claude/settings.json` existe dans workspace mais lecture bloquée par permissions sandbox. Point important: si ces permissions changent et que vous faites des builds Docker sans `.dockerignore`, ce genre de fichier peut partir dans le contexte build.
-- Le repo promet "single-file CLI" et "zero runtime dependencies", mais shipping Docker + build npm + divers docs agent fait vite moins minimal que le pitch. Pas sécurité pure, mais angle moquerie facile.
+- In the committed files I read: no API key, token, secret, personal email, or real session dump. `examples/sample.jsonl` looks synthetic.
+- `config.json` only contains public pricing URLs. Nothing sensitive.
+- The local `.git/config` contains `git@github.com:tamer-ai-dev/planfit.git` and `[email protected]`, but it is not versioned. Not a problem for the public repo per se.
+- `.claude/settings.json` exists in the workspace but reading it was blocked by sandbox permissions. Key point: if those permissions change and you run Docker builds without `.dockerignore`, that kind of file can leak into the build context.
+- The repo promises "single-file CLI" and "zero runtime dependencies", but shipping Docker + npm build + assorted agent docs ends up less minimal than the pitch. Not a security issue, but an easy angle for snark.
 
-## Avis brut
+## Raw take
 
-Pas de secret obvious dans ce qui va partir sur GitHub. Pas de RCE via `config.json`: c'est du `JSON.parse`, point. Pas de path traversal classique non plus. Le vrai sujet sécurité, c'est robustesse locale et hygiène d'outillage autour: build context Docker qui peut aspirer des fichiers perso, scans non bornés, lecture full-file en mémoire, et quelques sorties terminal non assainies. Pour un post Hacker News, je corrigerais surtout `.dockerignore` + limites de taille/streaming avant publication. Le reste, c'est surtout du "local footgun", mais les footguns font les meilleurs commentaires HN.
+No obvious secret in what is heading to GitHub. No RCE via `config.json`: it is `JSON.parse`, end of story. No classic path traversal either. The real security topic is local robustness and tooling hygiene: the Docker build context that can suck up personal files, unbounded scans, full-file reads in memory, and a few unsanitized terminal outputs. For a Hacker News post, I would fix `.dockerignore` and size / streaming limits first. The rest is mostly "local footgun" territory, but footguns make the best HN comments.

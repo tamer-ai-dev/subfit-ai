@@ -1,38 +1,38 @@
-# Review codex
+# Codex review
 
 ## Findings
 
-1. **`assistantLines` sert de base au verdict abonnement alors que code prétend raisonner sur messages avec usage.**
-   Réf: [subfit-ai.ts](subfit-ai.ts:430), [subfit-ai.ts](subfit-ai.ts:433), [subfit-ai.ts](subfit-ai.ts:1214), [README.md](README.md:69).
-   `scanJsonl()` et `scanGeminiSession()` incrémentent `assistantLines` avant validation du bloc `usage` / `tokens`, puis `main()` passe `ctx.assistantLines` à `computeSubscriptionStats()`. Donc verdict 5h peut être gonflé par des tours assistant sans métriques, alors que README dit explicitement "keeps only lines ... with a `message.usage` block". Test Gemini encode même ce comportement comme normal: [tests/gemini.test.ts](tests/gemini.test.ts:121). Pour un outil de pricing, c'est cœur du résultat qui part faux.
+1. **`assistantLines` drives the subscription verdict even though the code claims to reason about messages that have usage.**
+   Refs: [subfit-ai.ts](subfit-ai.ts:430), [subfit-ai.ts](subfit-ai.ts:433), [subfit-ai.ts](subfit-ai.ts:1214), [README.md](README.md:69).
+   `scanJsonl()` and `scanGeminiSession()` bump `assistantLines` before validating the `usage` / `tokens` block, and then `main()` passes `ctx.assistantLines` to `computeSubscriptionStats()`. So the 5h verdict can be inflated by assistant turns that carry no metrics, even though the README explicitly says "keeps only lines ... with a `message.usage` block". The Gemini test even encodes this behaviour as expected: [tests/gemini.test.ts](tests/gemini.test.ts:121). For a pricing tool, this is the core result going wrong.
 
-2. **Support Gemini casse sémantique des colonnes "Claude $" / "What you actually paid to Anthropic".**
-   Réf: [README.md](README.md:74), [subfit-ai.ts](subfit-ai.ts:618), [subfit-ai.ts](subfit-ai.ts:651), [config.json](config.json:10).
-   Depuis ajout des buckets `gemini-*`, `computeRows()` prend `pricing[model]` sans distinguer fournisseur puis affiche ça dans colonne `Claude $`. Pour lignes Gemini, vous affichez donc un coût Gemini API sous label "Claude $", et ratio "Codex / Claude" devient faux. Même problème dans export Markdown. README continue à promettre "What you actually paid to Anthropic". Non. Rapport mélange coûts multi-provider avec vocabulaire Claude-only.
+2. **Gemini support breaks the semantics of the "Claude $" column and of "What you actually paid to Anthropic".**
+   Refs: [README.md](README.md:74), [subfit-ai.ts](subfit-ai.ts:618), [subfit-ai.ts](subfit-ai.ts:651), [config.json](config.json:10).
+   Since the `gemini-*` buckets were added, `computeRows()` pulls `pricing[model]` without distinguishing provider and then shows the result under the `Claude $` column. For Gemini rows you are therefore displaying a Gemini-API cost under a "Claude $" label, and the "Codex / Claude" ratio becomes wrong. Same problem in the Markdown export. The README still promises "What you actually paid to Anthropic". No. The report mixes multi-provider costs with Claude-only vocabulary.
 
-3. **`--demo` n'est pas isolé: il continue à scanner `~/.gemini` si dossier existe.**
-   Réf: [subfit-ai.ts](subfit-ai.ts:1155), [subfit-ai.ts](subfit-ai.ts:1161), [subfit-ai.ts](subfit-ai.ts:1174), [README.md](README.md:98), [README.md](README.md:110).
-   `--demo` remplace seulement `args.path`. `args.geminiPath` reste réel. Sur machine ayant Gemini CLI, démo "synthetic fixture" est polluée par vraies sessions Gemini. Donc zéro reproductibilité, zéro "zero setup", et sortie de démo dépend machine locale.
+3. **`--demo` is not isolated: it keeps scanning `~/.gemini` if the directory exists.**
+   Refs: [subfit-ai.ts](subfit-ai.ts:1155), [subfit-ai.ts](subfit-ai.ts:1161), [subfit-ai.ts](subfit-ai.ts:1174), [README.md](README.md:98), [README.md](README.md:110).
+   `--demo` only overrides `args.path`. `args.geminiPath` stays pointed at the real root. On a machine that has the Gemini CLI installed, the "synthetic fixture" demo is polluted by the user's actual Gemini sessions. So zero reproducibility, zero "zero setup", and the demo output depends on the local machine.
 
-4. **Export Markdown ment sur scan quand Gemini participe, ou pire quand repo est Gemini-only.**
-   Réf: [subfit-ai.ts](subfit-ai.ts:1042), [subfit-ai.ts](subfit-ai.ts:1254), [subfit-ai.ts](subfit-ai.ts:1287).
-   `renderMarkdown()` reçoit seulement `scanPath` et `filesScanned` côté Claude. Si user scanne uniquement Gemini, rapport exporté peut afficher `0 JSONL file(s) under ~/.claude` alors que analyse réelle vient de `~/.gemini`. Export n'est plus représentation fidèle de l'exécution.
+4. **The Markdown export misrepresents the scan when Gemini participates, or worse when the run is Gemini-only.**
+   Refs: [subfit-ai.ts](subfit-ai.ts:1042), [subfit-ai.ts](subfit-ai.ts:1254), [subfit-ai.ts](subfit-ai.ts:1287).
+   `renderMarkdown()` only receives `scanPath` and `filesScanned` from the Claude side. If the user scans only Gemini, the exported report can display `0 JSONL file(s) under ~/.claude` while the actual analysis came from `~/.gemini`. The export is no longer a faithful record of the run.
 
-5. **Warning modèles inconnus est faux dès qu'un modèle Gemini inconnu apparaît.**
-   Réf: [subfit-ai.ts](subfit-ai.ts:507), [subfit-ai.ts](subfit-ai.ts:1206).
-   `normalizeGeminiModel()` fallback vers `gemini-pro`, mais warning global dit toujours "bucketed as Claude Opus" et conseille uniquement `normalizeModel()`. Message opératoire faux. En debug pricing, ça envoie user au mauvais endroit.
+5. **The unknown-model warning is wrong as soon as an unknown Gemini model shows up.**
+   Refs: [subfit-ai.ts](subfit-ai.ts:507), [subfit-ai.ts](subfit-ai.ts:1206).
+   `normalizeGeminiModel()` falls back to `gemini-pro`, but the global warning still says "bucketed as Claude Opus" and only points at `normalizeModel()`. The operational message is wrong. When someone is debugging pricing, this sends them to the wrong spot.
 
-6. **README dérive déjà de config réelle.**
-   Réf: [README.md](README.md:219), [config.json](config.json:5).
-   Exemple config documente `Claude Opus 4` à `15 / 75 / 1.5 / 18.75`; config réelle embarquée est `5 / 25 / 0.5 / 6.25`. Ce n'est pas un détail cosmétique: repo vend du pricing, README montre autres chiffres. Même drift pour Haiku (`0.80 / 4.0 / 0.08 / 1.0` vs `1.0 / 5.0 / 0.10 / 1.25`).
+6. **The README is already drifting from the real config.**
+   Refs: [README.md](README.md:219), [config.json](config.json:5).
+   The config example documents `Claude Opus 4` at `15 / 75 / 1.5 / 18.75`; the actual embedded config is `5 / 25 / 0.5 / 6.25`. Not a cosmetic detail: the repo sells pricing, and the README shows different numbers. Same drift for Haiku (`0.80 / 4.0 / 0.08 / 1.0` vs `1.0 / 5.0 / 0.10 / 1.25`).
 
-## Ce qui manque
+## What's missing
 
-- Tests end-to-end pour cas mixtes Claude+Gemini sur rendu terminal/Markdown/JSON.
-- Test `--demo` garantissant absence de lecture provider réel.
-- Test protégeant invariants docs/config ou génération README depuis config unique. Là, drift déjà visible.
-- Clarification conceptuelle: outil compare quoi exactement quand source = Gemini ? "coût réel provider d'origine" ? "coût Claude équivalent" ? "coût Codex équivalent" ? Aujourd'hui texte et colonnes disent plusieurs choses incompatibles.
+- End-to-end tests for mixed Claude+Gemini cases against terminal / Markdown / JSON rendering.
+- A `--demo` test that guarantees no real provider data is read.
+- A test that protects the "README and config agree" invariant, or a README generated from a single config source. The drift is already visible.
+- Conceptual clarification: what is the tool actually comparing when the source is Gemini? "Real cost at the native provider"? "Equivalent cost on Claude"? "Equivalent cost on Codex"? Today the prose and the columns say several incompatible things.
 
-## Avis brut
+## Raw take
 
-Base utilitaire, code lisible, tests unitaires propres. Mais produit raconte une histoire plus nette que réalité. Ajout Gemini a traversé couches de calcul sans refonte vocabulaire ni sorties. Résultat: chiffres potentiellement faux sur verdict abonnement, labels faux sur coûts, README déjà désynchronisé. Avant nouvelle feature, je verrouillerais définition métier et j'écrirais 2-3 tests d'intégration qui snapshot sortie mixte.
+Solid utility baseline, readable code, clean unit tests. But the product tells a cleaner story than reality. Adding Gemini cut across compute layers without reworking the vocabulary or the outputs. Result: potentially wrong numbers on the subscription verdict, wrong labels on costs, README already out of sync. Before a new feature, I would lock down the business definition and write 2-3 integration tests that snapshot the mixed output.

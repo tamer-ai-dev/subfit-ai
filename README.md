@@ -322,6 +322,9 @@ inside the config.
 
 ## Comparison landscape
 
+_Snapshot as of 2026-04-23. Provider pricing changes frequently — verify
+against each vendor's current pricing page before relying on these numbers._
+
 `subfit-ai` currently compares Claude (API + subscriptions) against OpenAI
 Codex (API + Plus / Pro / Pro 20x). The coding-assistant market is wider
 than that — the snapshot below is for orientation, not a feature list.

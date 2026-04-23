@@ -155,7 +155,10 @@ describe("sanitizeForTerminal", () => {
 
   it("is a no-op on clean ASCII and Unicode", () => {
     expect(sanitizeForTerminal("claude-opus-4-7")).toBe("claude-opus-4-7");
-    expect(sanitizeForTerminal("gémini-pro")).toBe("gémini-pro");
+    // Non-ASCII Unicode (above 0x9F) must pass through untouched — only
+    // C0 and C1 control bands are stripped.
+    expect(sanitizeForTerminal("gpt-α-β")).toBe("gpt-α-β");
+    expect(sanitizeForTerminal("モデル-7")).toBe("モデル-7");
   });
 });
 
