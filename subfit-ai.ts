@@ -1024,8 +1024,9 @@ interface MarkdownInput {
   subStats: SubscriptionStats;
   pricing: Record<string, ModelPricing>;
   planLimits: Record<string, PlanLimits>;
-  scanPath: string;
-  filesScanned: number;
+  /** Per-provider scan snapshots. Inactive providers are filtered out of the
+   *  header; a Gemini-only run never mentions Claude and vice-versa. */
+  providerStats: ProviderStats[];
   minTs: string | null;
   maxTs: string | null;
 }
@@ -1039,7 +1040,18 @@ export function renderMarkdown(inp: MarkdownInput): string {
   out.push("## subfit-ai Report — find the plan that fits your usage");
   out.push("");
   out.push(`**Date:** ${today}  `);
-  out.push(`**Scanned:** ${inp.filesScanned.toLocaleString()} JSONL file(s) under \`${inp.scanPath}\`  `);
+  const activeProviders = inp.providerStats.filter(p => p.files > 0 || p.assistantLines > 0);
+  if (activeProviders.length === 0) {
+    out.push(`**Scanned:** no session files found`);
+  } else {
+    out.push(`**Scanned:**  `);
+    for (const p of activeProviders) {
+      const unit = p.totalLines === null ? "session file(s)" : "JSONL file(s)";
+      const filesStr = p.files.toLocaleString();
+      const msgsStr = p.assistantLines.toLocaleString();
+      out.push(`- **${p.name}**: ${filesStr} ${unit}, ${msgsStr} assistant message(s)`);
+    }
+  }
   out.push(`**Session date range:** ${firstDate} → ${lastDate}`);
   out.push("");
 
@@ -1290,7 +1302,7 @@ function main(): number {
         const md = renderMarkdown({
           rows, byMonth: ctx.byMonth, subStats,
           pricing, planLimits,
-          scanPath: args.path, filesScanned: files.length,
+          providerStats,
           minTs: ctx.minTs, maxTs: ctx.maxTs,
         });
         writeFileSync(target, md, "utf-8");
@@ -1330,7 +1342,7 @@ function main(): number {
       const md = renderMarkdown({
         rows, byMonth: ctx.byMonth, subStats,
         pricing, planLimits,
-        scanPath: args.path, filesScanned: files.length,
+        providerStats,
         minTs: ctx.minTs, maxTs: ctx.maxTs,
       });
       writeFileSync(target, md, "utf-8");
