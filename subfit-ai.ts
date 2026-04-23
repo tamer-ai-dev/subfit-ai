@@ -123,6 +123,8 @@ interface Args {
   geminiPath: string;
   /** Root to scan for Mistral Vibe CLI sessions (~/.vibe or $VIBE_HOME). Skipped silently if missing. */
   vibePath: string;
+  /** Root to scan for OpenAI Codex CLI sessions (~/.codex or $CODEX_HOME). Skipped silently if missing. */
+  codexPath: string;
   json: boolean;
   help: boolean;
   monthly: boolean;
@@ -159,6 +161,7 @@ function parseArgs(argv: string[]): Args {
     path: join(homedir(), ".claude"),
     geminiPath: join(homedir(), ".gemini"),
     vibePath: process.env.VIBE_HOME ?? join(homedir(), ".vibe"),
+    codexPath: process.env.CODEX_HOME ?? join(homedir(), ".codex"),
     json: false,
     help: false,
     monthly: true,
@@ -183,6 +186,8 @@ function parseArgs(argv: string[]): Args {
     else if (a.startsWith("--gemini-path=")) args.geminiPath = a.slice("--gemini-path=".length);
     else if (a === "--vibe-path") args.vibePath = argv[++i] ?? args.vibePath;
     else if (a.startsWith("--vibe-path=")) args.vibePath = a.slice("--vibe-path=".length);
+    else if (a === "--codex-path") args.codexPath = argv[++i] ?? args.codexPath;
+    else if (a.startsWith("--codex-path=")) args.codexPath = a.slice("--codex-path=".length);
     else if (a === "--config") args.config = argv[++i] ?? null;
     else if (a.startsWith("--config=")) args.config = a.slice("--config=".length);
     else if (a === "--export") {
@@ -218,6 +223,10 @@ OPTIONS
                   Root directory holding Mistral Vibe CLI sessions (default:
                   $VIBE_HOME or ~/.vibe). Scans logs/**/*.{json,jsonl}. Skipped
                   silently if the directory does not exist.
+  --codex-path <dir>
+                  Root directory holding OpenAI Codex CLI sessions (default:
+                  $CODEX_HOME or ~/.codex). Scans sessions/** and history/**
+                  for *.{json,jsonl}. Skipped silently if missing.
   --config <file> Path to a pricing/plan-limits JSON (default:
                   <script-dir>/config.json; falls back to built-in defaults
                   if the file is missing or malformed).
@@ -1531,14 +1540,14 @@ function main(): number {
   }
 
   // --demo overrides all scan roots with bundled fixtures. The Gemini /
-  // Vibe overrides point at directories that may or may not exist — if
-  // they don't, the corresponding scan is skipped silently (the normal
-  // missing-root behavior), so --demo never bleeds into a user's real
-  // ~/.gemini or ~/.vibe data.
+  // Vibe / Codex overrides point at directories that may or may not exist —
+  // if they don't, the corresponding scan is skipped silently, so --demo
+  // never bleeds into real ~/.gemini, ~/.vibe, or ~/.codex data.
   if (args.demo) {
     args.path = join(scriptDir(), "examples");
     args.geminiPath = join(scriptDir(), "examples-gemini");
     args.vibePath = join(scriptDir(), "examples-vibe");
+    args.codexPath = join(scriptDir(), "examples-codex");
   }
 
   // Abort only when NONE of the provider roots exist — each provider is
@@ -1546,12 +1555,14 @@ function main(): number {
   const claudeExists = existsSync(args.path);
   const geminiExists = existsSync(args.geminiPath);
   const vibeExists   = existsSync(args.vibePath);
-  if (!claudeExists && !geminiExists && !vibeExists) {
+  const codexExists  = existsSync(args.codexPath);
+  if (!claudeExists && !geminiExists && !vibeExists && !codexExists) {
     process.stderr.write(`subfit-ai: no provider path exists\n`);
     process.stderr.write(`  --path         ${args.path}\n`);
     process.stderr.write(`  --gemini-path  ${args.geminiPath}\n`);
     process.stderr.write(`  --vibe-path    ${args.vibePath}\n`);
-    process.stderr.write(`  (use --path / --gemini-path / --vibe-path to point somewhere else, or --help)\n`);
+    process.stderr.write(`  --codex-path   ${args.codexPath}\n`);
+    process.stderr.write(`  (use --path / --gemini-path / --vibe-path / --codex-path to point somewhere else, or --help)\n`);
     return 1;
   }
 
@@ -1561,10 +1572,12 @@ function main(): number {
   const files = claudeExists ? findJsonlFiles(args.path) : [];
   const geminiFiles = geminiExists ? findGeminiSessions(args.geminiPath) : [];
   const vibeFiles   = vibeExists   ? findVibeSessions(args.vibePath)     : [];
+  const codexFiles  = codexExists  ? findCodexSessions(args.codexPath)   : [];
 
   const ctxClaude = emptyScanContext();
   const ctxGemini = emptyScanContext();
   const ctxVibe   = emptyScanContext();
+  const ctxCodex  = emptyScanContext();
 
   // Progress logs → stderr only so --json output on stdout stays clean.
   if (claudeExists) {
@@ -1592,14 +1605,26 @@ function main(): number {
       `(${ctxVibe.assistantLines.toLocaleString()} assistant messages)\n`,
     );
   }
+  if (codexExists) {
+    process.stderr.write(`⏳ Scanning Codex sessions under ${args.codexPath} ...\n`);
+    for (const f of codexFiles) scanCodexSession(f, ctxCodex);
+    process.stderr.write(
+      `✓ Codex: ${codexFiles.length.toLocaleString()} session(s) scanned ` +
+      `(${ctxCodex.assistantLines.toLocaleString()} assistant messages)\n`,
+    );
+  }
   process.stderr.write(`⏳ Computing costs ...\n`);
-  const ctx = mergeContexts(mergeContexts(ctxClaude, ctxGemini), ctxVibe);
+  const ctx = mergeContexts(
+    mergeContexts(mergeContexts(ctxClaude, ctxGemini), ctxVibe),
+    ctxCodex,
+  );
   process.stderr.write(`✓ Done.\n`);
 
   const providerStats: ProviderStats[] = [
-    providerStatsOf("Claude", files.length, ctxClaude, "lines"),
+    providerStatsOf("Claude", files.length,       ctxClaude, "lines"),
     providerStatsOf("Gemini", geminiFiles.length, ctxGemini, "sessions"),
     providerStatsOf("Vibe",   vibeFiles.length,   ctxVibe,   "sessions"),
+    providerStatsOf("Codex",  codexFiles.length,  ctxCodex,  "sessions"),
   ];
 
   // M1 — warn when model strings didn't match any known bucket. Per-provider
@@ -1621,13 +1646,18 @@ function main(): number {
     process.stderr.write(`subfit-ai: unrecognized Vibe model id(s) bucketed as Devstral 2: ${list}\n`);
     process.stderr.write(`  (update normalizeVibeModel() or config.pricing to add a proper bucket)\n`);
   }
+  if (ctx.unknownCodexModels.size > 0) {
+    const list = [...ctx.unknownCodexModels].map(sanitizeForTerminal).sort().join(", ");
+    process.stderr.write(`subfit-ai: unrecognized Codex model id(s) bucketed as codex-standard: ${list}\n`);
+    process.stderr.write(`  (update normalizeCodexModel() or config.pricing to add a proper bucket)\n`);
+  }
 
   const rows = computeRows(ctx.byModel, pricing);
   const subStats = computeSubscriptionStats(
     ctx.withUsage,        // 5h verdict is about messages that actually spent tokens;
     ctx.minTs,            // bare assistantLines over-counts tool-only / empty turns.
     ctx.maxTs,
-    files.length + geminiFiles.length + vibeFiles.length,  // session ≈ 1 file per provider
+    files.length + geminiFiles.length + vibeFiles.length + codexFiles.length,  // 1 file ≈ 1 session per provider
     ctx.byMonth.size,                   // distinct YYYY-MM buckets with data
   );
   // M2 — subscription verdicts also surfaced in JSON output.
@@ -1663,10 +1693,12 @@ function main(): number {
       path: args.path,
       geminiPath: args.geminiPath,
       vibePath: args.vibePath,
+      codexPath: args.codexPath,
       configSource,
       filesScanned: files.length,
       geminiSessionsScanned: geminiFiles.length,
       vibeSessionsScanned: vibeFiles.length,
+      codexSessionsScanned: codexFiles.length,
       dateRange: { first: ctx.minTs, last: ctx.maxTs },
       stats: {
         totalLines: ctx.totalLines,
@@ -1677,6 +1709,7 @@ function main(): number {
       unknownClaudeModels: [...ctx.unknownClaudeModels].sort(),
       unknownGeminiModels: [...ctx.unknownGeminiModels].sort(),
       unknownVibeModels:   [...ctx.unknownVibeModels].sort(),
+      unknownCodexModels:  [...ctx.unknownCodexModels].sort(),
       providerStats,
       pricing,
       planLimits,
