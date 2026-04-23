@@ -203,10 +203,6 @@ Mistral Enterprise  custom    unlimited  unlimited — fits                     
 Sessions: 947 total over 2 month(s) (avg 473.5/mo). Max plans cap at 50 sessions/mo.
   ⚠ EXCEEDS 50 sessions/mo cap on Claude Max plans
 
-⚠ Claude subscription limits are documented baselines, not guarantees. Community
-  reports indicate they can deplete faster than expected on some workloads.
-  If your avg is within 20% of a plan limit, expect occasional throttling.
-
 → Best fit: Mistral Pro at $15/mo — unlimited 5h throughput
 
 ── Per model ──
@@ -231,6 +227,10 @@ TOTAL   131,080   11.4M  56.2M  $8160.54   $3550.85      0.44x
 Ratio column: Codex-Std cost divided by the Provider cost on the same tokens.
   <1.0  → Codex cheaper than the native provider on this volume
   >1.0  → Native provider cheaper than Codex on this volume
+
+⚠ Claude subscription limits are documented baselines, not guarantees. Community
+  reports indicate they can deplete faster than expected on some workloads.
+  If your avg is within 20% of a plan limit, expect occasional throttling.
 ```
 
 The terminal output leads with the subscription verdict (the question you

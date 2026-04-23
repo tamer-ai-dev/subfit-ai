@@ -1282,9 +1282,10 @@ function renderSubscriptionSection(stats: SubscriptionStats, planLimits: Record<
   parts.push(sessionsLine);
   if (sessionsWarn) parts.push(sessionsWarn);
   parts.push("");
-  parts.push(VOLATILITY_WARNING);
-  parts.push("");
   parts.push(bestLine);
+  // Volatility warning is now emitted AFTER the per-model / per-month
+  // tables in main() so the subscription → tables → warnings flow reads
+  // cleanly. See the terminal-output section of main().
   return parts.join("\n") + "\n";
 }
 
@@ -1643,30 +1644,33 @@ function main(): number {
     providerStatsOf("Codex",  codexFiles.length,  ctxCodex,  "sessions"),
   ];
 
-  // M1 — warn when model strings didn't match any known bucket. Per-provider
-  // so the default bucket named in the warning (Opus / Pro) is accurate.
+  // Unknown-model warnings are collected here and emitted at the END of
+  // the run (after tables on stdout are flushed) so the output reads
+  // cleanly: summary → subscription → per-model → per-month → warnings.
   // Raw wire names come from untrusted JSONL/JSON content and must be
   // sanitized before writing to a TTY to avoid escape-sequence injection.
-  if (ctx.unknownClaudeModels.size > 0) {
-    const list = [...ctx.unknownClaudeModels].map(sanitizeForTerminal).sort().join(", ");
-    process.stderr.write(`subfit-ai: unrecognized Claude model id(s) bucketed as Claude Opus: ${list}\n`);
-    process.stderr.write(`  (update normalizeModel() or config.pricing to add a proper bucket)\n`);
-  }
-  if (ctx.unknownGeminiModels.size > 0) {
-    const list = [...ctx.unknownGeminiModels].map(sanitizeForTerminal).sort().join(", ");
-    process.stderr.write(`subfit-ai: unrecognized Gemini model id(s) bucketed as Gemini Pro: ${list}\n`);
-    process.stderr.write(`  (update normalizeGeminiModel() or config.pricing to add a proper bucket)\n`);
-  }
-  if (ctx.unknownVibeModels.size > 0) {
-    const list = [...ctx.unknownVibeModels].map(sanitizeForTerminal).sort().join(", ");
-    process.stderr.write(`subfit-ai: unrecognized Vibe model id(s) bucketed as Devstral 2: ${list}\n`);
-    process.stderr.write(`  (update normalizeVibeModel() or config.pricing to add a proper bucket)\n`);
-  }
-  if (ctx.unknownCodexModels.size > 0) {
-    const list = [...ctx.unknownCodexModels].map(sanitizeForTerminal).sort().join(", ");
-    process.stderr.write(`subfit-ai: unrecognized Codex model id(s) bucketed as codex-standard: ${list}\n`);
-    process.stderr.write(`  (update normalizeCodexModel() or config.pricing to add a proper bucket)\n`);
-  }
+  const emitUnknownModelWarnings = () => {
+    if (ctx.unknownClaudeModels.size > 0) {
+      const list = [...ctx.unknownClaudeModels].map(sanitizeForTerminal).sort().join(", ");
+      process.stderr.write(`subfit-ai: unrecognized Claude model id(s) bucketed as Claude Opus: ${list}\n`);
+      process.stderr.write(`  (update normalizeModel() or config.pricing to add a proper bucket)\n`);
+    }
+    if (ctx.unknownGeminiModels.size > 0) {
+      const list = [...ctx.unknownGeminiModels].map(sanitizeForTerminal).sort().join(", ");
+      process.stderr.write(`subfit-ai: unrecognized Gemini model id(s) bucketed as Gemini Pro: ${list}\n`);
+      process.stderr.write(`  (update normalizeGeminiModel() or config.pricing to add a proper bucket)\n`);
+    }
+    if (ctx.unknownVibeModels.size > 0) {
+      const list = [...ctx.unknownVibeModels].map(sanitizeForTerminal).sort().join(", ");
+      process.stderr.write(`subfit-ai: unrecognized Vibe model id(s) bucketed as Devstral 2: ${list}\n`);
+      process.stderr.write(`  (update normalizeVibeModel() or config.pricing to add a proper bucket)\n`);
+    }
+    if (ctx.unknownCodexModels.size > 0) {
+      const list = [...ctx.unknownCodexModels].map(sanitizeForTerminal).sort().join(", ");
+      process.stderr.write(`subfit-ai: unrecognized Codex model id(s) bucketed as codex-standard: ${list}\n`);
+      process.stderr.write(`  (update normalizeCodexModel() or config.pricing to add a proper bucket)\n`);
+    }
+  };
 
   const rows = computeRows(ctx.byModel, pricing);
   const subStats = computeSubscriptionStats(
@@ -1741,6 +1745,10 @@ function main(): number {
       ),
     };
     process.stdout.write(JSON.stringify(payload, null, 2) + "\n");
+    // Warnings fire after the JSON document — JSON consumers parse the
+    // single object on stdout; humans inspecting both streams still get
+    // the warning text on stderr at the end of the run.
+    emitUnknownModelWarnings();
     // Allow --export alongside --json
     if (args.exportPath) {
       const target = args.exportPath;
@@ -1783,7 +1791,15 @@ function main(): number {
   out.push("Ratio column: Codex-Std cost divided by the Provider cost on the same tokens.");
   out.push("  <1.0  → Codex cheaper than the native provider on this volume");
   out.push("  >1.0  → Native provider cheaper than Codex on this volume");
+  // Volatility warning lands after all tables so the output flow reads
+  // summary → subscription → per-model → per-month → warnings.
+  out.push("");
+  out.push(VOLATILITY_WARNING);
   process.stdout.write(out.join("\n") + "\n");
+
+  // Unknown-model warnings go last on stderr so they appear below the
+  // (stdout-bound) tables in an interleaved terminal view.
+  emitUnknownModelWarnings();
 
   // --export: write GFM markdown report alongside the terminal output
   if (args.exportPath) {
