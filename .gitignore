@@ -11,6 +11,7 @@ dist/
 .*
 !.gitignore
 !.github/
+!.gitkeep
 
 # Coverage
 coverage/
