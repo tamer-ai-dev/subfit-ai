@@ -1,7 +1,7 @@
 {
   "name": "subfit-ai",
   "version": "1.1.0",
-  "description": "find the plan that fits your usage — compare Claude Code token consumption with OpenAI Codex pricing and subscription tiers.",
+  "description": "Compare AI coding subscriptions against your actual Claude Code usage, offline.",
   "type": "module",
   "bin": {
     "subfit-ai": "./subfit-ai.ts"
