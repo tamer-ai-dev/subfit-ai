@@ -9,7 +9,9 @@
     "codex-priority":   { "label": "OpenAI Codex (gpt-5.3-codex) priority", "input": 3.50, "cacheWrite": 0, "output": 28.0 },
     "gemini-pro":        { "label": "Gemini 2.5 Pro",        "input": 1.00, "output": 10.00, "cacheRead": 0.10, "cacheWrite": 0, "_source": "https://ai.google.dev/gemini-api/docs/pricing" },
     "gemini-flash":      { "label": "Gemini 2.5 Flash",      "input": 0.30, "output": 2.50,  "cacheRead": 0.03, "cacheWrite": 0, "_source": "https://ai.google.dev/gemini-api/docs/pricing" },
-    "gemini-flash-lite": { "label": "Gemini 2.5 Flash-Lite", "input": 0.10, "output": 0.40,  "cacheRead": 0.01, "cacheWrite": 0, "_source": "https://ai.google.dev/gemini-api/docs/pricing" }
+    "gemini-flash-lite": { "label": "Gemini 2.5 Flash-Lite", "input": 0.10, "output": 0.40,  "cacheRead": 0.01, "cacheWrite": 0, "_source": "https://ai.google.dev/gemini-api/docs/pricing" },
+    "devstral-2":        { "label": "Mistral Devstral 2 (123B)",    "input": 0.40, "output": 2.00, "cacheRead": 0, "cacheWrite": 0, "_source": "https://mistral.ai/pricing" },
+    "devstral-small-2":  { "label": "Mistral Devstral Small 2 (24B)", "input": 0.10, "output": 0.30, "cacheRead": 0, "cacheWrite": 0, "_source": "https://mistral.ai/pricing" }
   },
   "planLimits": {
     "claude-pro":        { "label": "Claude Pro",        "monthlyUsd": 20,   "messagesPer5h": [10, 45],    "sessionsCap": null, "note": "40-45 observed, shared across claude.ai + Code + Desktop" },
