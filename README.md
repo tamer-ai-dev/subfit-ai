@@ -66,6 +66,7 @@ Run with `npx tsx` (no install needed — requires Node 18+):
 
 ```bash
 npx tsx ./subfit-ai.ts                    # scan ~/.claude with defaults
+npx tsx ./subfit-ai.ts --demo             # use bundled examples/sample.jsonl
 npx tsx ./subfit-ai.ts --path /custom     # scan another directory
 npx tsx ./subfit-ai.ts --config my.json   # custom pricing / plan file
 npx tsx ./subfit-ai.ts --json             # machine-readable output
@@ -75,6 +76,11 @@ npx tsx ./subfit-ai.ts --export out.md    # write to a custom path
 npx tsx ./subfit-ai.ts --json --export    # JSON to stdout + Markdown file
 npx tsx ./subfit-ai.ts --help
 ```
+
+If you haven't run Claude Code yet, `--demo` scans a synthetic
+`examples/sample.jsonl` (50 fake assistant messages across Opus / Sonnet /
+Haiku, spanning 3 months) so you can see the full output shape without any
+real session data.
 
 Or install it as a bin with `npm link` and call `subfit-ai` directly — the
 script carries a `#!/usr/bin/env -S npx tsx` shebang so there is no
@@ -89,6 +95,7 @@ compile step.
 | `--json` | off | Emit a single JSON object instead of terminal tables |
 | `--no-monthly` | off | Skip the YYYY-MM breakdown |
 | `--export [file]` | — | Write a Markdown (GFM) report; path defaults to `./subfit-report.md`, **overwrites** existing files with a stderr warning |
+| `--demo` | off | Scan `examples/sample.jsonl` bundled with the script instead of `--path` — zero setup |
 | `-h`, `--help` | — | Print the built-in help |
 
 ## Example output

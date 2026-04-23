@@ -127,6 +127,8 @@ interface Args {
   exportPath: string | null;
   /** Unrecognized tokens — main() emits stderr warnings so tests can inspect parsing in isolation. */
   unknownFlags: string[];
+  /** When true, main() scans examples/sample.jsonl next to the script instead of --path. */
+  demo: boolean;
 }
 
 const DEFAULT_EXPORT_PATH = "subfit-report.md";
@@ -140,11 +142,13 @@ function parseArgs(argv: string[]): Args {
     config: null,
     exportPath: null,
     unknownFlags: [],
+    demo: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--help" || a === "-h") args.help = true;
     else if (a === "--json") args.json = true;
+    else if (a === "--demo") args.demo = true;
     else if (a === "--no-monthly") args.monthly = false;
     else if (a === "--path") args.path = argv[++i] ?? args.path;
     else if (a.startsWith("--path=")) args.path = a.slice("--path=".length);
@@ -183,6 +187,8 @@ OPTIONS
   --export [file] Write a Markdown (GFM) report. If no file is given, defaults
                   to ./subfit-report.md. Overwrites existing files with a warning.
                   Can be combined with normal terminal output.
+  --demo          Scan examples/sample.jsonl bundled with this script instead
+                  of --path. Useful for trying the tool without Claude Code.
   -h, --help      Show this help.
 
 WHAT IT DOES
@@ -891,6 +897,9 @@ function main(): number {
     process.stderr.write(`subfit-ai: unknown arg(s) ignored: ${args.unknownFlags.join(" ")}\n`);
     process.stderr.write(`  (run with --help to see supported options)\n`);
   }
+
+  // --demo overrides --path with the bundled sample fixture.
+  if (args.demo) args.path = join(scriptDir(), "examples");
 
   if (!existsSync(args.path)) {
     process.stderr.write(`subfit-ai: path not found: ${args.path}\n`);
