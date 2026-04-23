@@ -1054,4 +1054,5 @@ if (invokedAs && (invokedAs.endsWith("/subfit-ai.ts") || invokedAs.endsWith("/su
   process.exit(main());
 }
 
-export { parseArgs, FALLBACK_CONFIG };
+export { parseArgs, FALLBACK_CONFIG, verdict5h, findBestFit, classifyPlans, MARGIN_THRESHOLD };
+export type { BestFitRecommendation, PlanStatus };

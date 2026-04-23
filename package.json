@@ -7,7 +7,9 @@
     "subfit-ai": "./subfit-ai.ts"
   },
   "scripts": {
-    "start": "tsx subfit-ai.ts"
+    "start": "tsx subfit-ai.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
   },
   "keywords": [
     "claude",
@@ -25,5 +27,11 @@
   "license": "MIT",
   "engines": {
     "node": ">=18"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
   }
 }
