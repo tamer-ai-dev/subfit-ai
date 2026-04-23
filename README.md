@@ -172,13 +172,14 @@ on Windows — npm generates a `.cmd` wrapper that calls `tsx` directly.
 
 ```
 ── Scan summary ──
-Provider  Files  Lines    Assistant  With-usage  Parse-errors  Date range
-────────  ─────  ───────  ─────────  ──────────  ────────────  ───────────────────────
-Claude    847    362,140  90,320     90,320      0             2026-03-22 → 2026-04-22
-Gemini    50     —        24,750     24,750      0             2026-03-22 → 2026-04-22
-Vibe      20     —        10,000     10,000      0             2026-03-22 → 2026-04-22
-Codex     30     —        6,010      6,010       0             2026-03-22 → 2026-04-22
-TOTAL     947    —        131,080    131,080     0
+Provider  Files  Entries  Messages  With tokens  Parse-errors  Date range
+────────  ─────  ───────  ────────  ───────────  ────────────  ───────────────────────
+Claude    847    362,140  90,320    90,320       0             2026-03-22 → 2026-04-22
+Gemini    50     28,420   24,750    24,750       0             2026-03-22 → 2026-04-22
+Vibe      20     11,450   10,000    10,000       0             2026-03-22 → 2026-04-22
+Codex     30     6,840    6,010     6,010        0             2026-03-22 → 2026-04-22
+TOTAL     947    408,850  131,080   131,080      0
+Tokens: 11.4M input, 56.2M output, 15.9B cache-read, 184M cache-write (all providers combined)
 Config: ./config.json
 
 ── Subscription comparison ──

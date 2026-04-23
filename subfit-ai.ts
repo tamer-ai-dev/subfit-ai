@@ -470,26 +470,28 @@ function mergeContexts(a: ScanContext, b: ScanContext): ScanContext {
   return out;
 }
 
-/** Per-provider snapshot used to render the "Scan summary" table. `totalLines`
- *  is null for providers whose unit is 1 session file (Gemini), because
- *  counting "lines" makes no sense when the entire file is one JSON object. */
+/** Per-provider snapshot used to render the "Scan summary" table.
+ *  `entries` is the total count of parsed items in the transcript —
+ *  non-blank lines for JSONL (Claude), message-array entries for the
+ *  JSON-shape providers (Gemini, Vibe, Codex). Works as a single
+ *  comparable column across providers regardless of on-disk format. */
 interface ProviderStats {
   name: string;
   files: number;
-  totalLines: number | null;
-  assistantLines: number;
-  withUsage: number;
+  entries: number;
+  messages: number;
+  withTokens: number;
   parseErrors: number;
   minTs: string | null;
   maxTs: string | null;
 }
 
-function providerStatsOf(name: string, files: number, ctx: ScanContext, linesMode: "lines" | "sessions"): ProviderStats {
+function providerStatsOf(name: string, files: number, ctx: ScanContext): ProviderStats {
   return {
     name, files,
-    totalLines: linesMode === "lines" ? ctx.totalLines : null,
-    assistantLines: ctx.assistantLines,
-    withUsage: ctx.withUsage,
+    entries: ctx.totalLines,
+    messages: ctx.assistantLines,
+    withTokens: ctx.withUsage,
     parseErrors: ctx.parseErrors,
     minTs: ctx.minTs,
     maxTs: ctx.maxTs,
@@ -609,12 +611,14 @@ export function scanGeminiSession(filePath: string, ctx: ScanContext): void {
   try { content = readFileSync(filePath, "utf-8"); }
   catch { return; }
 
-  ctx.totalLines++; // count each session file as one "line" for header stats
   let session: any;
   try { session = JSON.parse(content); } catch { ctx.parseErrors++; return; }
 
   const messages = Array.isArray(session?.messages) ? session.messages : [];
   for (const msg of messages) {
+    // Every entry in the array is one "entry" for the Scan summary table;
+    // assistantLines counts only the turns we ultimately price.
+    ctx.totalLines++;
     if (msg?.type !== "gemini") continue;
     ctx.assistantLines++;
     const tokens = msg.tokens;
@@ -724,8 +728,6 @@ export function scanVibeSession(filePath: string, ctx: ScanContext): void {
   try { content = readFileSync(filePath, "utf-8"); }
   catch { return; }
 
-  ctx.totalLines++; // count each session file as one "line" for header stats
-
   // Try full-file JSON first; fall back to JSONL if that fails.
   let turns: any[] = [];
   try {
@@ -744,6 +746,9 @@ export function scanVibeSession(filePath: string, ctx: ScanContext): void {
   }
 
   for (const turn of turns) {
+    // Count every entry in the transcript; assistantLines counts only the
+    // turns we price downstream.
+    ctx.totalLines++;
     const isAssistant =
       turn?.role === "assistant" ||
       turn?.type === "assistant" ||
@@ -868,8 +873,6 @@ export function scanCodexSession(filePath: string, ctx: ScanContext): void {
   try { content = readFileSync(filePath, "utf-8"); }
   catch { return; }
 
-  ctx.totalLines++; // count each session file as one "line" for header stats
-
   let turns: any[] = [];
   try {
     const parsed = JSON.parse(content);
@@ -888,6 +891,9 @@ export function scanCodexSession(filePath: string, ctx: ScanContext): void {
   }
 
   for (const turn of turns) {
+    // Count every entry in the transcript; assistantLines counts only the
+    // turns we price downstream.
+    ctx.totalLines++;
     const isAssistant =
       turn?.role === "assistant" ||
       turn?.type === "assistant" ||
@@ -1289,8 +1295,8 @@ function renderSubscriptionSection(stats: SubscriptionStats, planLimits: Record<
   return parts.join("\n") + "\n";
 }
 
-function renderScanSummary(providers: ProviderStats[], configSource: string): string {
-  const active = providers.filter(p => p.files > 0 || p.assistantLines > 0);
+function renderScanSummary(providers: ProviderStats[], ctx: ScanContext, configSource: string): string {
+  const active = providers.filter(p => p.files > 0 || p.messages > 0);
   const out: string[] = ["── Scan summary ──"];
   if (active.length === 0) {
     out.push("No session files found.");
@@ -1298,39 +1304,56 @@ function renderScanSummary(providers: ProviderStats[], configSource: string): st
     return out.join("\n") + "\n";
   }
 
-  const header = ["Provider", "Files", "Lines", "Assistant", "With-usage", "Parse-errors", "Date range"];
+  const header = ["Provider", "Files", "Entries", "Messages", "With tokens", "Parse-errors", "Date range"];
   const body: string[][] = [];
-  let totFiles = 0, totAssist = 0, totWithUsage = 0, totParseErrors = 0;
+  let totFiles = 0, totEntries = 0, totMessages = 0, totWithTokens = 0, totParseErrors = 0;
 
   for (const p of active) {
     const range = p.minTs && p.maxTs ? `${p.minTs.slice(0, 10)} → ${p.maxTs.slice(0, 10)}` : "—";
     body.push([
       p.name,
       p.files.toLocaleString(),
-      p.totalLines === null ? "—" : p.totalLines.toLocaleString(),
-      p.assistantLines.toLocaleString(),
-      p.withUsage.toLocaleString(),
+      p.entries.toLocaleString(),
+      p.messages.toLocaleString(),
+      p.withTokens.toLocaleString(),
       String(p.parseErrors),
       range,
     ]);
-    totFiles        += p.files;
-    totAssist       += p.assistantLines;
-    totWithUsage    += p.withUsage;
-    totParseErrors  += p.parseErrors;
+    totFiles       += p.files;
+    totEntries     += p.entries;
+    totMessages    += p.messages;
+    totWithTokens  += p.withTokens;
+    totParseErrors += p.parseErrors;
   }
   if (active.length > 1) {
     body.push([
       "TOTAL",
       totFiles.toLocaleString(),
-      "—",  // heterogeneous units — JSONL lines + JSON sessions don't sum
-      totAssist.toLocaleString(),
-      totWithUsage.toLocaleString(),
+      totEntries.toLocaleString(),
+      totMessages.toLocaleString(),
+      totWithTokens.toLocaleString(),
       String(totParseErrors),
       "",
     ]);
   }
 
   out.push(renderTable(header, body).join("\n"));
+
+  // Token totals across all providers — a one-liner below the table so the
+  // reader sees the full scale of the scan at a glance without scrolling
+  // through per-model rows.
+  let input = 0, output = 0, cacheRead = 0, cacheWrite = 0;
+  for (const t of ctx.byModel.values()) {
+    input     += t.inputTokens;
+    output    += t.outputTokens;
+    cacheRead += t.cacheReadTokens;
+    cacheWrite += t.cacheCreationTokens;
+  }
+  out.push(
+    `Tokens: ${fmtTokens(input)} input, ${fmtTokens(output)} output, ` +
+    `${fmtTokens(cacheRead)} cache-read, ${fmtTokens(cacheWrite)} cache-write ` +
+    `(all providers combined)`,
+  );
   out.push(`Config: ${configSource === "fallback" ? "embedded defaults" : configSource}`);
   return out.join("\n") + "\n";
 }
@@ -1416,16 +1439,15 @@ export function renderMarkdown(inp: MarkdownInput): string {
   out.push("## subfit-ai Report — find the plan that fits your usage");
   out.push("");
   out.push(`**Date:** ${today}  `);
-  const activeProviders = inp.providerStats.filter(p => p.files > 0 || p.assistantLines > 0);
+  const activeProviders = inp.providerStats.filter(p => p.files > 0 || p.messages > 0);
   if (activeProviders.length === 0) {
     out.push(`**Scanned:** no session files found`);
   } else {
     out.push(`**Scanned:**  `);
     for (const p of activeProviders) {
-      const unit = p.totalLines === null ? "session file(s)" : "JSONL file(s)";
       const filesStr = p.files.toLocaleString();
-      const msgsStr = p.assistantLines.toLocaleString();
-      out.push(`- **${p.name}**: ${filesStr} ${unit}, ${msgsStr} assistant message(s)`);
+      const msgsStr = p.messages.toLocaleString();
+      out.push(`- **${p.name}**: ${filesStr} file(s), ${msgsStr} assistant message(s)`);
     }
   }
   out.push(`**Session date range:** ${firstDate} → ${lastDate}`);
@@ -1638,10 +1660,10 @@ function main(): number {
   progressClear();
 
   const providerStats: ProviderStats[] = [
-    providerStatsOf("Claude", files.length,       ctxClaude, "lines"),
-    providerStatsOf("Gemini", geminiFiles.length, ctxGemini, "sessions"),
-    providerStatsOf("Vibe",   vibeFiles.length,   ctxVibe,   "sessions"),
-    providerStatsOf("Codex",  codexFiles.length,  ctxCodex,  "sessions"),
+    providerStatsOf("Claude", files.length,       ctxClaude),
+    providerStatsOf("Gemini", geminiFiles.length, ctxGemini),
+    providerStatsOf("Vibe",   vibeFiles.length,   ctxVibe),
+    providerStatsOf("Codex",  codexFiles.length,  ctxCodex),
   ];
 
   // Unknown-model warnings are collected here and emitted at the END of
@@ -1777,7 +1799,7 @@ function main(): number {
   }
 
   const out: string[] = [];
-  out.push(renderScanSummary(providerStats, configSource));
+  out.push(renderScanSummary(providerStats, ctx, configSource));
   // Lead with the subscription verdict (the question users actually came for);
   // the per-model / per-month tables follow as supporting evidence.
   out.push("── Subscription comparison ──");
