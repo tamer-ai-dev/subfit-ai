@@ -505,8 +505,8 @@ export function computeSubscriptionStats(
 const MAX_SESSIONS_PER_MONTH_CAP = 50;
 
 const VOLATILITY_WARNING =
-  "⚠ Claude limits are documented baselines, not guarantees. Users report limits\n" +
-  "  depleting faster than expected since March 2026 (GitHub docs #37, #38).\n" +
+  "⚠ Claude subscription limits are documented baselines, not guarantees. Community\n" +
+  "  reports indicate they can deplete faster than expected on some workloads.\n" +
   "  If your avg is within 20% of a plan limit, expect occasional throttling.";
 
 /** Avg >= 80% of the relevant 5h ceiling flags the plan MARGINAL (technically
@@ -863,9 +863,9 @@ export function renderMarkdown(inp: MarkdownInput): string {
       out.push(`> ⚠ EXCEEDS ${MAX_SESSIONS_PER_MONTH_CAP} sessions/mo cap on Claude Max plans`);
     }
     out.push("");
-    out.push("> ⚠ Claude limits are documented baselines, not guarantees. Users report");
-    out.push("> limits depleting faster than expected since March 2026 (GitHub docs #37,");
-    out.push("> #38). If your avg is within 20% of a plan limit, expect occasional throttling.");
+    out.push("> ⚠ Claude subscription limits are documented baselines, not guarantees.");
+    out.push("> Community reports indicate they can deplete faster than expected on some");
+    out.push("> workloads. If your avg is within 20% of a plan limit, expect occasional throttling.");
     out.push("");
     const best = findBestFit(inp.subStats, inp.planLimits);
     out.push(`**${renderBestFit(best)}**`);
