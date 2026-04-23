@@ -71,7 +71,8 @@ describe("scanGeminiSession", () => {
     byMonth: new Map(),
     minTs: null, maxTs: null,
     totalLines: 0, assistantLines: 0, withUsage: 0, parseErrors: 0,
-    unknownModels: new Set(),
+    unknownClaudeModels: new Set(),
+    unknownGeminiModels: new Set(),
   });
 
   let tmpFile: string;
@@ -132,7 +133,7 @@ describe("scanGeminiSession", () => {
     expect(ctx.assistantLines).toBe(0);
   });
 
-  it("adds unrecognized model strings to unknownModels", () => {
+  it("adds unrecognized model strings to unknownGeminiModels (not unknownClaudeModels)", () => {
     writeFileSync(tmpFile, JSON.stringify({
       messages: [
         { type: "gemini", tokens: { input: 1, output: 1, cached: 0 }, model: "palm-v5" },
@@ -141,6 +142,7 @@ describe("scanGeminiSession", () => {
     const ctx = freshCtx();
     scanGeminiSession(tmpFile, ctx);
 
-    expect(ctx.unknownModels.has("palm-v5")).toBe(true);
+    expect(ctx.unknownGeminiModels.has("palm-v5")).toBe(true);
+    expect(ctx.unknownClaudeModels.has("palm-v5")).toBe(false);
   });
 });

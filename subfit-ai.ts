@@ -335,8 +335,10 @@ interface ScanContext {
   assistantLines: number;
   withUsage: number;
   parseErrors: number;
-  /** Raw model strings that didn't match haiku/sonnet/opus — bucketed as opus as a fallback. */
-  unknownModels: Set<string>;
+  /** Claude wire names (from JSONL scanner) that didn't match haiku/sonnet/opus. */
+  unknownClaudeModels: Set<string>;
+  /** Gemini wire names (from session-JSON scanner) that didn't match pro/flash/flash-lite. */
+  unknownGeminiModels: Set<string>;
 }
 
 function emptyScanContext(): ScanContext {
@@ -345,14 +347,16 @@ function emptyScanContext(): ScanContext {
     byMonth: new Map(),
     minTs: null, maxTs: null,
     totalLines: 0, assistantLines: 0, withUsage: 0, parseErrors: 0,
-    unknownModels: new Set(),
+    unknownClaudeModels: new Set(),
+    unknownGeminiModels: new Set(),
   };
 }
 
 /** Merge two scan contexts into a new one. Per-provider scanning fills its own
  *  ScanContext so the summary table can show per-provider stats; downstream
  *  costing logic operates on the merged result. Counters add; date bounds
- *  extend; unknownModels union; byModel / byMonth totals are summed per key. */
+ *  extend; per-provider unknown-model sets union; byModel / byMonth totals
+ *  are summed per key. */
 function mergeContexts(a: ScanContext, b: ScanContext): ScanContext {
   const out = emptyScanContext();
   out.totalLines     = a.totalLines     + b.totalLines;
@@ -371,7 +375,8 @@ function mergeContexts(a: ScanContext, b: ScanContext): ScanContext {
   };
 
   for (const src of [a, b]) {
-    for (const m of src.unknownModels) out.unknownModels.add(m);
+    for (const m of src.unknownClaudeModels) out.unknownClaudeModels.add(m);
+    for (const m of src.unknownGeminiModels) out.unknownGeminiModels.add(m);
     for (const [model, t] of src.byModel) {
       const cur = out.byModel.get(model);
       if (!cur) out.byModel.set(model, { ...t });
@@ -434,7 +439,7 @@ function scanJsonl(filePath: string, ctx: ScanContext): void {
 
     const rawModel = obj.message?.model;
     const { key: model, matched } = normalizeModel(rawModel);
-    if (!matched && typeof rawModel === "string" && rawModel) ctx.unknownModels.add(rawModel);
+    if (!matched && typeof rawModel === "string" && rawModel) ctx.unknownClaudeModels.add(rawModel);
     const ts: string | undefined = obj.timestamp;
     if (ts && (!ctx.minTs || ts < ctx.minTs)) ctx.minTs = ts;
     if (ts && (!ctx.maxTs || ts > ctx.maxTs)) ctx.maxTs = ts;
@@ -537,7 +542,7 @@ export function scanGeminiSession(filePath: string, ctx: ScanContext): void {
 
     const rawModel = msg.model;
     const { key: model, matched } = normalizeGeminiModel(rawModel);
-    if (!matched && typeof rawModel === "string" && rawModel) ctx.unknownModels.add(rawModel);
+    if (!matched && typeof rawModel === "string" && rawModel) ctx.unknownGeminiModels.add(rawModel);
 
     const ts: string | undefined = msg.timestamp;
     if (ts && (!ctx.minTs || ts < ctx.minTs)) ctx.minTs = ts;
@@ -1221,11 +1226,17 @@ function main(): number {
     providerStatsOf("Gemini", geminiFiles.length, ctxGemini, "sessions"),
   ];
 
-  // M1 — warn when model strings didn't match any known bucket (bucketed as Opus).
-  if (ctx.unknownModels.size > 0) {
-    const list = [...ctx.unknownModels].sort().join(", ");
-    process.stderr.write(`subfit-ai: unrecognized model id(s) bucketed as Claude Opus: ${list}\n`);
+  // M1 — warn when model strings didn't match any known bucket. Per-provider
+  // so the default bucket named in the warning (Opus / Pro) is accurate.
+  if (ctx.unknownClaudeModels.size > 0) {
+    const list = [...ctx.unknownClaudeModels].sort().join(", ");
+    process.stderr.write(`subfit-ai: unrecognized Claude model id(s) bucketed as Claude Opus: ${list}\n`);
     process.stderr.write(`  (update normalizeModel() or config.pricing to add a proper bucket)\n`);
+  }
+  if (ctx.unknownGeminiModels.size > 0) {
+    const list = [...ctx.unknownGeminiModels].sort().join(", ");
+    process.stderr.write(`subfit-ai: unrecognized Gemini model id(s) bucketed as Gemini Pro: ${list}\n`);
+    process.stderr.write(`  (update normalizeGeminiModel() or config.pricing to add a proper bucket)\n`);
   }
 
   const rows = computeRows(ctx.byModel, pricing);
@@ -1278,7 +1289,8 @@ function main(): number {
         withUsage: ctx.withUsage,
         parseErrors: ctx.parseErrors,
       },
-      unknownModels: [...ctx.unknownModels].sort(),
+      unknownClaudeModels: [...ctx.unknownClaudeModels].sort(),
+      unknownGeminiModels: [...ctx.unknownGeminiModels].sort(),
       providerStats,
       pricing,
       planLimits,
