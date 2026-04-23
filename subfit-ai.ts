@@ -377,6 +377,110 @@ function scanJsonl(filePath: string, ctx: ScanContext): void {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
+// Gemini CLI session scanner. Gemini persists one JSON object per session
+// under ~/.gemini/tmp/<slug>/chats/session-*.json — NOT JSONL. Each session
+// carries a `messages` array where assistant turns have `type: "gemini"` and
+// a `tokens` block with `input` / `output` / `cached` counts. See
+// docs/studies/STUDY-gemini-tokens.md for the full format.
+// ───────────────────────────────────────────────────────────────────────────
+
+/** Walk the Gemini CLI root and return every `session-*.json` file under
+ *  `tmp/<slug>/chats/`. Returns an empty list if `root` doesn't exist so
+ *  callers can skip Gemini silently when the CLI was never installed. */
+export function findGeminiSessions(root: string): string[] {
+  const files: string[] = [];
+  if (!existsSync(root)) return files;
+
+  const tmpDir = join(root, "tmp");
+  let slugs: string[];
+  try { slugs = readdirSync(tmpDir); } catch { return files; }
+
+  for (const slug of slugs) {
+    const chatsDir = join(tmpDir, slug, "chats");
+    let entries: string[];
+    try { entries = readdirSync(chatsDir); } catch { continue; }
+    for (const name of entries) {
+      if (name.startsWith("session-") && name.endsWith(".json")) {
+        files.push(join(chatsDir, name));
+      }
+    }
+  }
+  return files;
+}
+
+/** Gemini wire id → PRICING key. The matching order matters: "flash-lite"
+ *  must be tested before "flash" since the latter is a substring of the
+ *  former. Concrete wire names verified:
+ *
+ *    gemini-2.5-pro, gemini-3-pro-preview                → gemini-pro
+ *    gemini-2.5-flash, gemini-3-flash-preview            → gemini-flash
+ *    gemini-2.5-flash-lite, gemini-3-flash-lite-preview  → gemini-flash-lite
+ *
+ *  Unknown strings fall back to gemini-pro with matched:false so main()
+ *  warns once per run, matching the Claude side's behavior. */
+export function normalizeGeminiModel(m: string | undefined): { key: string; matched: boolean } {
+  if (!m) return { key: "gemini-pro", matched: false };
+  const low = m.toLowerCase();
+  if (low.includes("flash-lite")) return { key: "gemini-flash-lite", matched: true };
+  if (low.includes("flash")) return { key: "gemini-flash", matched: true };
+  if (low.includes("pro")) return { key: "gemini-pro", matched: true };
+  return { key: "gemini-pro", matched: false };
+}
+
+/** Parse a single Gemini session JSON file and fold its assistant turns into
+ *  the shared ScanContext. Silently skips files that fail to parse so one bad
+ *  session doesn't abort the whole run. Counters align with scanJsonl: each
+ *  assistant turn bumps assistantLines; turns with a `tokens` block bump
+ *  withUsage. Gemini has no cache-write tier, so cacheCreationTokens stays 0. */
+export function scanGeminiSession(filePath: string, ctx: ScanContext): void {
+  let content: string;
+  try { content = readFileSync(filePath, "utf-8"); }
+  catch { return; }
+
+  ctx.totalLines++; // count each session file as one "line" for header stats
+  let session: any;
+  try { session = JSON.parse(content); } catch { ctx.parseErrors++; return; }
+
+  const messages = Array.isArray(session?.messages) ? session.messages : [];
+  for (const msg of messages) {
+    if (msg?.type !== "gemini") continue;
+    ctx.assistantLines++;
+    const tokens = msg.tokens;
+    if (!tokens) continue;
+    ctx.withUsage++;
+
+    const rawModel = msg.model;
+    const { key: model, matched } = normalizeGeminiModel(rawModel);
+    if (!matched && typeof rawModel === "string" && rawModel) ctx.unknownModels.add(rawModel);
+
+    const ts: string | undefined = msg.timestamp;
+    if (ts && (!ctx.minTs || ts < ctx.minTs)) ctx.minTs = ts;
+    if (ts && (!ctx.maxTs || ts > ctx.maxTs)) ctx.maxTs = ts;
+
+    const addInto = (t: ModelTotals) => {
+      t.inputTokens += tokens.input ?? 0;
+      t.outputTokens += tokens.output ?? 0;
+      t.cacheReadTokens += tokens.cached ?? 0;
+      // Gemini has no cache-write equivalent; leave cacheCreationTokens alone.
+      t.messageCount++;
+    };
+
+    let mt = ctx.byModel.get(model);
+    if (!mt) { mt = emptyTotals(); ctx.byModel.set(model, mt); }
+    addInto(mt);
+
+    const ym = yearMonth(ts);
+    if (ym) {
+      let monthBucket = ctx.byMonth.get(ym);
+      if (!monthBucket) { monthBucket = new Map(); ctx.byMonth.set(ym, monthBucket); }
+      let mmt = monthBucket.get(model);
+      if (!mmt) { mmt = emptyTotals(); monthBucket.set(model, mmt); }
+      addInto(mmt);
+    }
+  }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
 // Cost math
 // ───────────────────────────────────────────────────────────────────────────
 
@@ -1083,4 +1187,4 @@ if (invokedAs && (invokedAs.endsWith("/subfit-ai.ts") || invokedAs.endsWith("/su
 }
 
 export { parseArgs, FALLBACK_CONFIG, verdict5h, findBestFit, classifyPlans, MARGIN_THRESHOLD };
-export type { BestFitRecommendation, PlanStatus };
+export type { BestFitRecommendation, PlanStatus, ScanContext, ModelTotals };
