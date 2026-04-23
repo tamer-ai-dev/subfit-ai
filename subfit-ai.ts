@@ -339,6 +339,83 @@ interface ScanContext {
   unknownModels: Set<string>;
 }
 
+function emptyScanContext(): ScanContext {
+  return {
+    byModel: new Map(),
+    byMonth: new Map(),
+    minTs: null, maxTs: null,
+    totalLines: 0, assistantLines: 0, withUsage: 0, parseErrors: 0,
+    unknownModels: new Set(),
+  };
+}
+
+/** Merge two scan contexts into a new one. Per-provider scanning fills its own
+ *  ScanContext so the summary table can show per-provider stats; downstream
+ *  costing logic operates on the merged result. Counters add; date bounds
+ *  extend; unknownModels union; byModel / byMonth totals are summed per key. */
+function mergeContexts(a: ScanContext, b: ScanContext): ScanContext {
+  const out = emptyScanContext();
+  out.totalLines     = a.totalLines     + b.totalLines;
+  out.assistantLines = a.assistantLines + b.assistantLines;
+  out.withUsage      = a.withUsage      + b.withUsage;
+  out.parseErrors    = a.parseErrors    + b.parseErrors;
+  out.minTs = a.minTs && b.minTs ? (a.minTs < b.minTs ? a.minTs : b.minTs) : (a.minTs ?? b.minTs);
+  out.maxTs = a.maxTs && b.maxTs ? (a.maxTs > b.maxTs ? a.maxTs : b.maxTs) : (a.maxTs ?? b.maxTs);
+
+  const foldTotals = (dst: ModelTotals, t: ModelTotals) => {
+    dst.inputTokens        += t.inputTokens;
+    dst.outputTokens       += t.outputTokens;
+    dst.cacheReadTokens    += t.cacheReadTokens;
+    dst.cacheCreationTokens += t.cacheCreationTokens;
+    dst.messageCount       += t.messageCount;
+  };
+
+  for (const src of [a, b]) {
+    for (const m of src.unknownModels) out.unknownModels.add(m);
+    for (const [model, t] of src.byModel) {
+      const cur = out.byModel.get(model);
+      if (!cur) out.byModel.set(model, { ...t });
+      else foldTotals(cur, t);
+    }
+    for (const [ym, bucket] of src.byMonth) {
+      let mm = out.byMonth.get(ym);
+      if (!mm) { mm = new Map(); out.byMonth.set(ym, mm); }
+      for (const [model, t] of bucket) {
+        const cur = mm.get(model);
+        if (!cur) mm.set(model, { ...t });
+        else foldTotals(cur, t);
+      }
+    }
+  }
+  return out;
+}
+
+/** Per-provider snapshot used to render the "Scan summary" table. `totalLines`
+ *  is null for providers whose unit is 1 session file (Gemini), because
+ *  counting "lines" makes no sense when the entire file is one JSON object. */
+interface ProviderStats {
+  name: string;
+  files: number;
+  totalLines: number | null;
+  assistantLines: number;
+  withUsage: number;
+  parseErrors: number;
+  minTs: string | null;
+  maxTs: string | null;
+}
+
+function providerStatsOf(name: string, files: number, ctx: ScanContext, linesMode: "lines" | "sessions"): ProviderStats {
+  return {
+    name, files,
+    totalLines: linesMode === "lines" ? ctx.totalLines : null,
+    assistantLines: ctx.assistantLines,
+    withUsage: ctx.withUsage,
+    parseErrors: ctx.parseErrors,
+    minTs: ctx.minTs,
+    maxTs: ctx.maxTs,
+  };
+}
+
 function scanJsonl(filePath: string, ctx: ScanContext): void {
   let content: string;
   try { content = readFileSync(filePath, "utf-8"); }
@@ -836,6 +913,52 @@ function renderSubscriptionSection(stats: SubscriptionStats, planLimits: Record<
   return parts.join("\n") + "\n";
 }
 
+function renderScanSummary(providers: ProviderStats[], configSource: string): string {
+  const active = providers.filter(p => p.files > 0 || p.assistantLines > 0);
+  const out: string[] = ["── Scan summary ──"];
+  if (active.length === 0) {
+    out.push("No session files found.");
+    out.push(`Config: ${configSource === "fallback" ? "embedded defaults" : configSource}`);
+    return out.join("\n") + "\n";
+  }
+
+  const header = ["Provider", "Files", "Lines", "Assistant", "With-usage", "Parse-errors", "Date range"];
+  const body: string[][] = [];
+  let totFiles = 0, totAssist = 0, totWithUsage = 0, totParseErrors = 0;
+
+  for (const p of active) {
+    const range = p.minTs && p.maxTs ? `${p.minTs.slice(0, 10)} → ${p.maxTs.slice(0, 10)}` : "—";
+    body.push([
+      p.name,
+      p.files.toLocaleString(),
+      p.totalLines === null ? "—" : p.totalLines.toLocaleString(),
+      p.assistantLines.toLocaleString(),
+      p.withUsage.toLocaleString(),
+      String(p.parseErrors),
+      range,
+    ]);
+    totFiles        += p.files;
+    totAssist       += p.assistantLines;
+    totWithUsage    += p.withUsage;
+    totParseErrors  += p.parseErrors;
+  }
+  if (active.length > 1) {
+    body.push([
+      "TOTAL",
+      totFiles.toLocaleString(),
+      "—",  // heterogeneous units — JSONL lines + JSON sessions don't sum
+      totAssist.toLocaleString(),
+      totWithUsage.toLocaleString(),
+      String(totParseErrors),
+      "",
+    ]);
+  }
+
+  out.push(renderTable(header, body).join("\n"));
+  out.push(`Config: ${configSource === "fallback" ? "embedded defaults" : configSource}`);
+  return out.join("\n") + "\n";
+}
+
 function renderMonthlySection(byMonth: Map<string, Map<string, ModelTotals>>, pricing: Record<string, ModelPricing>): string {
   if (byMonth.size === 0) return "No timestamped messages for monthly breakdown.\n";
 
@@ -1049,15 +1172,36 @@ function main(): number {
 
   const files = claudeExists ? findJsonlFiles(args.path) : [];
   const geminiFiles = geminiExists ? findGeminiSessions(args.geminiPath) : [];
-  const ctx: ScanContext = {
-    byModel: new Map(),
-    byMonth: new Map(),
-    minTs: null, maxTs: null,
-    totalLines: 0, assistantLines: 0, withUsage: 0, parseErrors: 0,
-    unknownModels: new Set(),
-  };
-  for (const f of files) scanJsonl(f, ctx);
-  for (const f of geminiFiles) scanGeminiSession(f, ctx);
+
+  const ctxClaude = emptyScanContext();
+  const ctxGemini = emptyScanContext();
+
+  // Progress logs → stderr only so --json output on stdout stays clean.
+  if (claudeExists) {
+    process.stderr.write(`⏳ Scanning Claude sessions under ${args.path} ...\n`);
+    for (const f of files) scanJsonl(f, ctxClaude);
+    process.stderr.write(
+      `✓ Claude: ${files.length.toLocaleString()} file(s) scanned ` +
+      `(${ctxClaude.totalLines.toLocaleString()} lines, ` +
+      `${ctxClaude.assistantLines.toLocaleString()} assistant messages)\n`,
+    );
+  }
+  if (geminiExists) {
+    process.stderr.write(`⏳ Scanning Gemini sessions under ${args.geminiPath} ...\n`);
+    for (const f of geminiFiles) scanGeminiSession(f, ctxGemini);
+    process.stderr.write(
+      `✓ Gemini: ${geminiFiles.length.toLocaleString()} session(s) scanned ` +
+      `(${ctxGemini.assistantLines.toLocaleString()} assistant messages)\n`,
+    );
+  }
+  process.stderr.write(`⏳ Computing costs ...\n`);
+  const ctx = mergeContexts(ctxClaude, ctxGemini);
+  process.stderr.write(`✓ Done.\n`);
+
+  const providerStats: ProviderStats[] = [
+    providerStatsOf("Claude", files.length, ctxClaude, "lines"),
+    providerStatsOf("Gemini", geminiFiles.length, ctxGemini, "sessions"),
+  ];
 
   // M1 — warn when model strings didn't match any known bucket (bucketed as Opus).
   if (ctx.unknownModels.size > 0) {
@@ -1117,6 +1261,7 @@ function main(): number {
         parseErrors: ctx.parseErrors,
       },
       unknownModels: [...ctx.unknownModels].sort(),
+      providerStats,
       pricing,
       planLimits,
       subscriptionStats: subStats,
@@ -1152,20 +1297,8 @@ function main(): number {
     return 0;
   }
 
-  const firstDate = ctx.minTs ? ctx.minTs.slice(0, 10) : "n/a";
-  const lastDate = ctx.maxTs ? ctx.maxTs.slice(0, 10) : "n/a";
-
   const out: string[] = [];
-  out.push(`Scanned ${files.length} Claude JSONL file(s) under ${args.path}`);
-  if (geminiFiles.length > 0) {
-    out.push(`  + ${geminiFiles.length} Gemini session file(s) under ${args.geminiPath}`);
-  } else if (existsSync(args.geminiPath)) {
-    out.push(`  + 0 Gemini session files found under ${args.geminiPath}`);
-  }
-  out.push(`  config: ${configSource === "fallback" ? "embedded defaults" : configSource}`);
-  out.push(`  lines: ${ctx.totalLines.toLocaleString()}  assistant: ${ctx.assistantLines.toLocaleString()}  with-usage: ${ctx.withUsage.toLocaleString()}  parse-errors: ${ctx.parseErrors}`);
-  out.push(`  date range: ${firstDate} → ${lastDate}`);
-  out.push("");
+  out.push(renderScanSummary(providerStats, configSource));
   // Lead with the subscription verdict (the question users actually came for);
   // the per-model / per-month tables follow as supporting evidence.
   out.push("── Subscription comparison ──");
