@@ -171,49 +171,62 @@ on Windows — npm generates a `.cmd` wrapper that calls `tsx` directly.
 > The figures below are fictional — they show the layout, not real usage data.
 
 ```
-Scanned 847 JSONL file(s) under ~/.claude
-  config: ./config.json
-  lines: 54,912  assistant: 12,431  with-usage: 12,431  parse-errors: 0
-  date range: 2026-03-22 → 2026-04-22
+── Scan summary ──
+Provider  Files  Lines    Assistant  With-usage  Parse-errors  Date range
+────────  ─────  ───────  ─────────  ──────────  ────────────  ───────────────────────
+Claude    847    362,140  90,320     90,320      0             2026-03-22 → 2026-04-22
+Gemini    50     —        24,750     24,750      0             2026-03-22 → 2026-04-22
+Vibe      20     —        10,000     10,000      0             2026-03-22 → 2026-04-22
+Codex     30     —        6,010      6,010       0             2026-03-22 → 2026-04-22
+TOTAL     947    —        131,080    131,080     0
+Config: ./config.json
 
 ── Subscription comparison ──
-Your usage: 12,431 assistant messages over 30.0 days
-  ≈ 414.4 msgs/day  ≈ 86.3 msgs per 5h window
+Your usage: 131,080 assistant messages over 30.0 days
+  ≈ 4369.3 msgs/day  ≈ 910.3 msgs per 5h window
 
-Plan               Price/mo  5h limit   Fits your avg?                                      Note
-─────────────────  ────────  ─────────  ──────────────────────────────────────────────────  ────────────────────────────────────
-Claude Pro         $20       10-45      EXCEEDS by 1.9x (avg 86.3 > high bound 45)          40-45 observed, shared across products
-Claude Max 5x      $100      225+       FITS comfortably (avg 86.3 ≤ baseline 225+)         225+ baseline, 50 sessions/mo cap
-Claude Max 20x     $200      900+       FITS comfortably (avg 86.3 ≤ baseline 900+)         900+ baseline, 50 sessions/mo cap
-Claude Team        $30       10-45      EXCEEDS by 1.9x (avg 86.3 > high bound 45)          similar to Pro, per seat
-Claude Enterprise  custom    unlimited  unlimited — fits                                    custom pricing, unlimited
-OpenAI Plus        $20       10-60      EXCEEDS by 1.4x (avg 86.3 > high bound 60)          Codex cloud tasks / 5h
-OpenAI Pro         $100      50-300     FITS at high-usage tier (avg 86.3 within [50-300])  Codex cloud tasks / 5h
-OpenAI Pro 20x     $200      200-1200   FITS comfortably (avg 86.3 ≤ low bound 200)         Codex cloud tasks / 5h
+Plan                Price/mo  5h limit   Fits your avg?                                        Note
+──────────────────  ────────  ─────────  ────────────────────────────────────────────────────  ────────────────────────────────────
+Claude Pro          $20       10-45      EXCEEDS by 20.2x (avg 910.3 > high bound 45)          40-45 observed, shared across products
+Claude Max 5x       $100      225+       EXCEEDS by 4.0x (avg 910.3 > baseline 225+)           225+ baseline, 50 sessions/mo cap
+Claude Max 20x      $200      900+       EXCEEDS by 1.0x (avg 910.3 > baseline 900+)           900+ baseline, 50 sessions/mo cap
+Claude Team         $30       10-45      EXCEEDS by 20.2x (avg 910.3 > high bound 45)          similar to Pro, per seat
+Claude Enterprise   custom    unlimited  unlimited — fits                                      custom pricing, unlimited
+OpenAI Plus         $20       10-60      EXCEEDS by 15.2x (avg 910.3 > high bound 60)          Codex cloud tasks / 5h
+OpenAI Pro          $100      50-300     EXCEEDS by 3.0x (avg 910.3 > high bound 300)          Codex cloud tasks / 5h
+OpenAI Pro 20x      $200      200-1200   FITS at high-usage tier (avg 910.3 within [200-1200]) Codex cloud tasks / 5h
+Mistral Free        $0        6+         EXCEEDS by 151.7x (avg 910.3 > baseline 6+)           6 free messages per day
+Mistral Pro         $15       unlimited  unlimited — fits                                      Vibe for all-day coding
+Mistral Team        $25       unlimited  unlimited — fits                                      $24.99/user/mo
+Mistral Enterprise  custom    unlimited  unlimited — fits                                      custom pricing
 
-Sessions: 847 total over 2 month(s) (avg 423.5/mo). Max plans cap at 50 sessions/mo.
+Sessions: 947 total over 2 month(s) (avg 473.5/mo). Max plans cap at 50 sessions/mo.
   ⚠ EXCEEDS 50 sessions/mo cap on Claude Max plans
 
 ⚠ Claude subscription limits are documented baselines, not guarantees. Community
   reports indicate they can deplete faster than expected on some workloads.
   If your avg is within 20% of a plan limit, expect occasional throttling.
 
-→ Best fit: OpenAI Pro at $100/mo — fits within high-usage band
+→ Best fit: Mistral Pro at $15/mo — unlimited 5h throughput
 
 ── Per model ──
-Model             Msgs   In    Out    CacheR  CacheW   Provider $  Codex-Std $  Codex-Pri $  Ratio
-────────────────  ─────  ────  ─────  ──────  ───────  ────────  ───────────  ───────────  ─────
-Claude Opus 4     9,284  842k  4.1M   1.2B    18.4M    $821.71   $268.87      $4317.75     0.33x
-Claude Sonnet 4   2,731  245k  1.2M   384M    6.1M     $156.81   $84.43       $1378.46     0.54x
-Claude Haiku 4.5    416   38k  195k   62M     1.2M     $8.71     $13.65       $222.59      1.57x
-TOTAL            12,431  1.12M 5.50M  1.65B   25.7M    $987.23   $366.95      $5918.80     0.37x
+Model              Msgs     In    Out    CacheR  CacheW  Provider $  Codex-Std $  Codex-Pri $  Ratio
+─────────────────  ───────  ────  ─────  ──────  ──────  ──────────  ───────────  ───────────  ─────
+Claude Opus 4      85,200   7.8M  38.5M  11.2B   173M    $7312.45    $2523.14     $41247.88    0.35x
+Gemini 2.5 Pro     19,850   1.8M   8.9M   2.6B   —       $380.21     $512.47      $8247.92     1.35x
+Claude Sonnet 4     5,120   412k   2.1M   670M   11.2M   $276.83     $154.22      $2521.14     0.56x
+OpenAI Codex        6,010   387k   1.8M   890M   —       $181.43     $181.43      $2903.56     1.00x
+Devstral 2          7,850   512k   2.4M   —      —       $5.00       $34.17       $547.52      6.83x
+Gemini 2.5 Flash    4,900   380k   1.7M   520M   —       $4.36       $133.80      $2150.72     30.69x
+Devstral Small 2    2,150   142k   812k   —      —       $0.26       $11.62       $185.86      44.69x
+TOTAL             131,080  11.4M  56.2M  15.9B   184M    $8160.54    $3550.85     $57804.60    0.44x
 
 ── Per month ──
-Month    Msgs    In    Out    Provider $  Codex-Std $  Ratio
-───────  ─────   ────  ─────  ────────  ───────────  ─────
-2026-03  3,217   238k  1.2M   $255.68   $94.97       0.37x
-2026-04  9,214   887k  4.3M   $731.55   $271.98      0.37x
-TOTAL   12,431  1.12M  5.50M  $987.23   $366.95      0.37x
+Month    Msgs     In    Out    Provider $  Codex-Std $  Ratio
+───────  ───────  ────  ─────  ──────────  ───────────  ─────
+2026-03  33,020    2.9M  14.1M  $2054.12    $894.12      0.44x
+2026-04  98,060    8.5M  42.1M  $6106.42   $2656.73      0.44x
+TOTAL   131,080   11.4M  56.2M  $8160.54   $3550.85      0.44x
 
 Ratio column: Codex-Std cost divided by the Provider cost on the same tokens.
   <1.0  → Codex cheaper than the native provider on this volume
@@ -227,8 +240,9 @@ evidence. Under the comparison table:
 - **Sessions line**: total distinct JSONL files (≈ Claude sessions) seen,
   the months they span, and the resulting `avg N/mo`. If the average
   exceeds 50, Claude Max plans will hit the session cap even when their
-  5h verdict says FITS — this is why the example above recommends OpenAI
-  Pro (which has no session cap) rather than Claude Max 20x.
+  5h verdict says FITS — this is why the example above recommends
+  Mistral Pro at $15/mo (unlimited, no session cap) over every Claude
+  Max tier or the pricier OpenAI Pro 20x.
 - **Volatility warning**: Claude subscription limits are documented
   baselines, not guarantees — community reports describe them depleting
   faster than expected on some workloads.
