@@ -129,6 +129,20 @@ interface Args {
   unknownFlags: string[];
   /** When true, main() scans examples/sample.jsonl next to the script instead of --path. */
   demo: boolean;
+  /** When true, main() prints the package version and exits. */
+  version: boolean;
+}
+
+/** Read `version` from package.json sitting next to the script. Returns "unknown"
+ *  if the file is missing / unreadable so --version never crashes. */
+function readVersion(): string {
+  try {
+    const raw = readFileSync(join(scriptDir(), "package.json"), "utf-8");
+    const parsed = JSON.parse(raw);
+    return typeof parsed?.version === "string" ? parsed.version : "unknown";
+  } catch {
+    return "unknown";
+  }
 }
 
 const DEFAULT_EXPORT_PATH = "subfit-report.md";
@@ -143,10 +157,12 @@ function parseArgs(argv: string[]): Args {
     exportPath: null,
     unknownFlags: [],
     demo: false,
+    version: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--help" || a === "-h") args.help = true;
+    else if (a === "--version" || a === "-v") args.version = true;
     else if (a === "--json") args.json = true;
     else if (a === "--demo") args.demo = true;
     else if (a === "--no-monthly") args.monthly = false;
@@ -189,6 +205,7 @@ OPTIONS
                   Can be combined with normal terminal output.
   --demo          Scan examples/sample.jsonl bundled with this script instead
                   of --path. Useful for trying the tool without Claude Code.
+  -v, --version   Print the package version and exit.
   -h, --help      Show this help.
 
 WHAT IT DOES
@@ -891,6 +908,7 @@ export function renderMarkdown(inp: MarkdownInput): string {
 function main(): number {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) { printHelp(); return 0; }
+  if (args.version) { process.stdout.write(`subfit-ai ${readVersion()}\n`); return 0; }
 
   // M3 — warn once per run about unrecognized tokens, then continue.
   if (args.unknownFlags.length > 0) {

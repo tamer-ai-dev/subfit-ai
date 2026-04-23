@@ -105,6 +105,7 @@ on Windows — npm generates a `.cmd` wrapper that calls `tsx` directly.
 | `--no-monthly` | off | Skip the YYYY-MM breakdown |
 | `--export [file]` | — | Write a Markdown (GFM) report; path defaults to `./subfit-report.md`, **overwrites** existing files with a stderr warning |
 | `--demo` | off | Scan `examples/sample.jsonl` bundled with the script instead of `--path` — zero setup |
+| `-v`, `--version` | — | Print the package version and exit |
 | `-h`, `--help` | — | Print the built-in help |
 
 ## Example output
