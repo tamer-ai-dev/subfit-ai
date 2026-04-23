@@ -17,6 +17,39 @@ entirely offline against the session files (JSONL for Claude,
 JSON/JSONL for Gemini, Vibe, and Codex) the four CLIs already write to
 disk.
 
+## Report
+```
+── Scan summary ──
+Provider  Files  Entries  Messages  With tokens  Parse-errors  Date range
+────────  ─────  ───────  ────────  ───────────  ────────────  ───────────────────────
+Claude    847    362,140  90,320    90,320       0             2026-03-22 → 2026-04-22
+Gemini    50     28,420   24,750    24,750       0             2026-03-22 → 2026-04-22
+Vibe      20     11,450   10,000    10,000       0             2026-03-22 → 2026-04-22
+Codex     30     6,840    6,010     6,010        0             2026-03-22 → 2026-04-22
+TOTAL     947    408,850  131,080   131,080      0
+Tokens: 11.4M input, 56.2M output, 15.9B cache-read, 184M cache-write (all providers combined)
+Config: ./config.json
+
+── Subscription comparison ──
+Your usage: 131,080 assistant messages over 30.0 days
+  ≈ 4369.3 msgs/day  ≈ 910.3 msgs per 5h window
+
+Plan                Price/mo  5h limit   Fits your avg?                                        Note
+──────────────────  ────────  ─────────  ────────────────────────────────────────────────────  ────────────────────────────────────
+Claude Pro          $20       10-45      EXCEEDS by 20.2x (avg 910.3 > high bound 45)          40-45 observed, shared across products
+Claude Max 5x       $100      225+       EXCEEDS by 4.0x (avg 910.3 > baseline 225+)           225+ baseline, 50 sessions/mo cap
+Claude Max 20x      $200      900+       EXCEEDS by 1.0x (avg 910.3 > baseline 900+)           900+ baseline, 50 sessions/mo cap
+...
+OpenAI Pro 20x      $200      200-1200   FITS at high-usage tier (avg 910.3 within [200-1200]) Codex cloud tasks / 5h
+Mistral Free        $0        6+         EXCEEDS by 151.7x (avg 910.3 > baseline 6+)           6 free messages per day
+Mistral Pro         $15       unlimited  unlimited — fits                                      Vibe for all-day coding
+
+Sessions: 947 total over 2 month(s) (avg 473.5/mo). Max plans cap at 50 sessions/mo.
+  ⚠ EXCEEDS 50 sessions/mo cap on Claude Max plans
+
+→ Best fit: Mistral Pro at $15/mo — unlimited 5h throughput
+```
+
 ## How it works
 
 **Data source: local session files only.** Three sources are scanned
