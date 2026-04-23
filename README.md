@@ -343,9 +343,10 @@ Pull requests, bug reports, and ideas are welcome. Good areas to start:
   with a real windowing algorithm that matches Anthropic's cap.
 - **Throttling model**: upgrade the verdict from "avg vs baseline" to a
   peak-aware model using the timestamps already in the data.
-- **Tests**: there is no test suite yet — a unit harness around
-  `normalizeModel`, `verdict5h`, `findBestFit`, and `computeRows` would
-  pay off quickly.
+- **Tests**: a unit harness around `normalizeModel`, `verdict5h`,
+  `findBestFit`, and `computeRows` exists in `tests/core.test.ts`. Please
+  run `npm test` before submitting changes and add new cases for any
+  logic branch you touch.
 
 Keep PRs focused (one change set per PR), update the `_source` fields
 when you bump numbers, and rerun `subfit-ai --json` to sanity-check any
