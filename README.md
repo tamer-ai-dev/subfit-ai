@@ -8,17 +8,18 @@
 
 ## What it does
 
-`subfit-ai` scans your local Claude Code **and Gemini CLI** session
-history, prices the same token volume on OpenAI Codex, and checks which
-subscription tier — Claude Pro / Max 5x / Max 20x / Team / Enterprise, or
-OpenAI Plus / Pro / Pro 20x — your real 5-hour usage actually fits into.
-It runs entirely offline against the JSONL (Claude) and JSON (Gemini)
-session files the two CLIs already write to disk.
+`subfit-ai` scans your local **Claude Code**, **Gemini CLI**, and
+**Mistral Vibe CLI** session history, prices the same token volume on
+OpenAI Codex, and checks which subscription tier — Claude Pro / Max 5x
+/ Max 20x / Team / Enterprise, or OpenAI Plus / Pro / Pro 20x — your
+real 5-hour usage actually fits into. It runs entirely offline against
+the session files (JSONL for Claude, JSON/JSONL for Gemini and Vibe)
+the three CLIs already write to disk.
 
 ## How it works
 
-**Data source: local session files only.** Two sources are scanned in
-parallel and merged into a single report:
+**Data source: local session files only.** Three sources are scanned
+in parallel and merged into a single report:
 
 - **Claude Code** appends one JSON event per line to
   `~/.claude/projects/<cwd-slug>/<sessionId>.jsonl` (one file per
@@ -27,6 +28,14 @@ parallel and merged into a single report:
   `~/.gemini/tmp/<slug>/chats/session-*.json` (full JSON, one file per
   session). See `docs/studies/STUDY-gemini-tokens.md` for the format
   details.
+- **Mistral Vibe CLI** writes session transcripts under
+  `~/.vibe/logs/` (the exact shape is [not verified][vibe-unverified]
+  on a live install; the scanner probes both full-file JSON and
+  line-by-line JSONL and maps the Mistral API `usage` block —
+  `prompt_tokens` / `completion_tokens` / `cached_tokens`). Honours
+  `$VIBE_HOME` if set. See `docs/studies/STUDY-vibe-tokens.md`.
+
+[vibe-unverified]: docs/studies/STUDY-vibe-tokens.md#4-session-file-format--unverified
 
 **`subfit-ai` makes no network calls at runtime.** The Docker image and
 the `npx` invocation both download dependencies (`tsx`, `vitest`, etc.)
@@ -101,11 +110,12 @@ YYYY-MM, and computes:
 Run with `npx tsx` (no install needed — requires Node 18+):
 
 ```bash
-npx tsx ./subfit-ai.ts                       # scan ~/.claude AND ~/.gemini
-npx tsx ./subfit-ai.ts --demo                # use bundled examples/sample.jsonl
-npx tsx ./subfit-ai.ts --path /custom        # override the Claude scan root
-npx tsx ./subfit-ai.ts --gemini-path /other  # override the Gemini scan root
-npx tsx ./subfit-ai.ts --config my.json      # custom pricing / plan file
+npx tsx ./subfit-ai.ts                         # scan ~/.claude, ~/.gemini AND ~/.vibe
+npx tsx ./subfit-ai.ts --demo                  # use bundled examples/sample.jsonl
+npx tsx ./subfit-ai.ts --path /custom          # override the Claude scan root
+npx tsx ./subfit-ai.ts --gemini-path /other    # override the Gemini scan root
+npx tsx ./subfit-ai.ts --vibe-path /elsewhere  # override the Vibe scan root
+npx tsx ./subfit-ai.ts --config my.json        # custom pricing / plan file
 npx tsx ./subfit-ai.ts --json             # machine-readable output
 npx tsx ./subfit-ai.ts --no-monthly       # skip the per-month table
 npx tsx ./subfit-ai.ts --export           # write ./subfit-report.md (GFM)
@@ -134,6 +144,7 @@ on Windows — npm generates a `.cmd` wrapper that calls `tsx` directly.
 | --- | --- | --- |
 | `--path <dir>` | `~/.claude` | Claude Code scan root — recursively globs `*.jsonl` |
 | `--gemini-path <dir>` | `~/.gemini` | Gemini CLI scan root — globs `tmp/<slug>/chats/session-*.json`; skipped silently if missing |
+| `--vibe-path <dir>` | `$VIBE_HOME` or `~/.vibe` | Mistral Vibe CLI scan root — recursively globs `logs/**/*.{json,jsonl}`; skipped silently if missing |
 | `--config <file>` | `./config.json` | Pricing + plan-limits config; falls back to the embedded `default-config.json` if missing or malformed |
 | `--json` | off | Emit a single JSON object instead of terminal tables |
 | `--no-monthly` | off | Skip the YYYY-MM breakdown |
