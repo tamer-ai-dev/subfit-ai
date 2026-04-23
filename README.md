@@ -28,11 +28,15 @@ parallel and merged into a single report:
   session). See `docs/studies/STUDY-gemini-tokens.md` for the format
   details.
 
-`subfit-ai` reads those files directly — no Anthropic/Google API export,
-no network call, no third-party aggregator. If either CLI has run on
-this machine, the data is already on disk and `subfit-ai` can price it.
-If a provider's root directory does not exist, that side is skipped
-silently; there is no "only Claude" or "only Gemini" mode switch.
+**`subfit-ai` makes no network calls at runtime.** The Docker image and
+the `npx` invocation both download dependencies (`tsx`, `vitest`, etc.)
+at *build* / *install* time via npm; once the tool is launched it does
+not reach Anthropic, Google, OpenAI, or any other remote service.
+There is no API export, no telemetry, no third-party aggregator. If
+either CLI has run on this machine, the data is already on disk and
+`subfit-ai` can price it. If a provider's root directory does not
+exist, that side is skipped silently; there is no "only Claude" or
+"only Gemini" mode switch.
 
 On the **Claude** side, every assistant turn carries token counts under
 `message.usage`:
