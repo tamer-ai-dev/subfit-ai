@@ -5,9 +5,10 @@
 #   docker build -t subfit-ai .
 #   docker run --rm -v "$HOME/.claude:/data:ro" subfit-ai --path /data
 #
-# Or try it with no session data at all:
-#
-#   docker run --rm subfit-ai --demo
+# Note: the image deliberately excludes tests/, docs/, and examples/ from
+# its build context (see .dockerignore). --demo therefore does NOT work
+# inside this image; use the host npx/tsx invocation if you need the
+# sample fixture.
 FROM node:20-alpine
 
 WORKDIR /app
@@ -19,7 +20,6 @@ COPY package.json ./
 COPY subfit-ai.ts ./
 COPY config.json ./
 COPY default-config.json ./
-COPY examples ./examples
 
 ENTRYPOINT ["tsx", "/app/subfit-ai.ts"]
 CMD ["--help"]

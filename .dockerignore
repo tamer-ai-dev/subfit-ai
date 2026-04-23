@@ -1,0 +1,32 @@
+# Keep the build context minimal — only files the runtime image actually
+# needs. Everything else (docs, tests, reviews, local state, VCS config)
+# is excluded to prevent context leaks.
+#
+# Files that survive (not matched by any rule below):
+#   subfit-ai.ts, config.json, default-config.json,
+#   package.json, package-lock.json, tsconfig.json, LICENSE
+
+# Hidden files and directories (VCS, CI, agent scaffolds, local config)
+.*
+
+# Dependencies and build artifacts
+node_modules
+coverage
+dist
+*.tgz
+
+# Local-only outputs
+reports
+
+# Development and test artifacts
+docs
+tests
+examples
+
+# Internal review / audit artifacts
+REVIEW*
+SECURITY*
+
+# All Markdown except the README
+*.md
+!README.md

@@ -12,6 +12,7 @@ dist/
 !.gitignore
 !.github/
 !.gitkeep
+!.dockerignore
 
 # Coverage
 coverage/
