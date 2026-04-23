@@ -217,6 +217,10 @@ OPTIONS
   -v, --version   Print the package version and exit.
   -h, --help      Show this help.
 
+LIMITS
+  Individual session files larger than 50 MB are skipped with a stderr
+  warning to prevent OOM on oversized or poisoned inputs.
+
 WHAT IT DOES
   Walks the given directory recursively, parses every *.jsonl file line by line,
   picks lines with type === "assistant", reads message.model + message.usage +
@@ -251,6 +255,22 @@ interface ModelTotals {
 
 function emptyTotals(): ModelTotals {
   return { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, messageCount: 0 };
+}
+
+/** Per-file size ceiling. A real Claude / Gemini session file stays well
+ *  under this (session JSONL caps out around a few MB in practice); a
+ *  50 MB file is almost certainly log pollution or an attempt to OOM the
+ *  process. Oversized files are skipped with a stderr warning. */
+const MAX_FILE_BYTES = 50 * 1024 * 1024;
+
+function fileTooLarge(filePath: string): boolean {
+  let size: number;
+  try { size = statSync(filePath).size; } catch { return false; }
+  if (size <= MAX_FILE_BYTES) return false;
+  const mb = (size / 1024 / 1024).toFixed(1);
+  const capMb = (MAX_FILE_BYTES / 1024 / 1024).toFixed(0);
+  process.stderr.write(`subfit-ai: skipping ${filePath} (${mb} MB > ${capMb} MB cap)\n`);
+  return true;
 }
 
 /** Walk root recursively, return every *.jsonl file path. Guards against cycles and unreadable dirs. */
@@ -422,6 +442,7 @@ function providerStatsOf(name: string, files: number, ctx: ScanContext, linesMod
 }
 
 function scanJsonl(filePath: string, ctx: ScanContext): void {
+  if (fileTooLarge(filePath)) return;
   let content: string;
   try { content = readFileSync(filePath, "utf-8"); }
   catch { return; }
@@ -524,6 +545,7 @@ export function normalizeGeminiModel(m: string | undefined): { key: string; matc
  *  assistant turn bumps assistantLines; turns with a `tokens` block bump
  *  withUsage. Gemini has no cache-write tier, so cacheCreationTokens stays 0. */
 export function scanGeminiSession(filePath: string, ctx: ScanContext): void {
+  if (fileTooLarge(filePath)) return;
   let content: string;
   try { content = readFileSync(filePath, "utf-8"); }
   catch { return; }
