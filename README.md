@@ -1,5 +1,9 @@
 # subfit-ai
 
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+[![Node](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)](./package.json)
+[![Tested with Claude Code](https://img.shields.io/badge/tested%20with-Claude%20Code-8A2BE2.svg)](https://claude.ai/code)
+
 **find the plan that fits your usage.**
 
 ## What it does
@@ -85,6 +89,11 @@ real session data.
 Or install it as a bin with `npm link` and call `subfit-ai` directly — the
 script carries a `#!/usr/bin/env -S npx tsx` shebang so there is no
 compile step.
+
+**Platform support**: tested on Linux and macOS. On native Windows, the
+`env -S` shebang is not honored by `cmd.exe`, so run the script via
+`npx tsx ./subfit-ai.ts …` or from a WSL shell. `npm link` still works
+on Windows — npm generates a `.cmd` wrapper that calls `tsx` directly.
 
 **CLI options**:
 
