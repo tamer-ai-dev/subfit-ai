@@ -142,14 +142,14 @@ Sessions: 847 total over 2 month(s) (avg 423.5/mo). Max plans cap at 50 sessions
 → Best fit: OpenAI Pro at $100/mo — fits within high-usage band
 
 ── Per model ──
-Model             Msgs   In    Out    CacheR  CacheW   Claude $    Codex-Std $  Codex-Pri $  Savings
+Model             Msgs   In    Out    CacheR  CacheW   Claude $    Codex-Std $  Codex-Pri $  Ratio
 ────────────────  ─────  ────  ─────  ──────  ───────  ──────────  ───────────  ───────────  ───────
 Claude Opus 4     9,284  842k  4.1M   1.2B    18.4M    $2,842.51   $331.85      $5,432.18    0.12x
 Claude Sonnet 4   2,731  245k  1.2M   384M    6.1M     $524.63     $192.47      $1,573.22    0.37x
 Claude Haiku 4.5    416   38k  195k   62M     1.2M     $12.87      $28.44       $276.33      2.21x
 
 ── Per month ──
-Month     Msgs    In    Out    Claude $    Codex-Std $  Savings
+Month     Msgs    In    Out    Claude $    Codex-Std $  Ratio
 ───────   ─────   ────  ─────  ──────────  ───────────  ───────
 2026-03   3,217   238k  1.2M   $927.32     $156.14      0.17x
 2026-04   9,214   887k  4.3M   $2,452.69   $396.62      0.16x
@@ -224,11 +224,17 @@ If `config.json` is missing or malformed, `subfit-ai` falls back to an
 embedded snapshot (`default-config.json`) and keeps running — the header
 prints `config: embedded defaults`.
 
-**Savings column**: `Codex-Std $` divided by the Claude cost on the same
-tokens. `<1.0` means Codex would have been cheaper on that volume; `>1.0`
-means Claude was cheaper. `cache_read_input_tokens` is usually the dominant
-count in Claude sessions (reading cached context); the comparison is
-apples-to-apples per provider's own cache policy.
+**Ratio column**: `Codex-Std $` divided by the Claude cost on the same
+tokens. It is a **cost ratio, not a savings percentage** — `0.12x` means
+Claude cost you 8× what Codex would have cost on that volume, not "12%
+savings". Read it as:
+
+- `<1.0` → Codex would have been cheaper on that volume
+- `>1.0` → Claude was the cheaper provider
+
+`cache_read_input_tokens` is usually the dominant count in Claude
+sessions (reading cached context); the comparison is apples-to-apples
+per provider's own cache policy.
 
 ## Updating plan data
 
