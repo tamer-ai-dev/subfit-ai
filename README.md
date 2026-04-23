@@ -143,17 +143,23 @@ Sessions: 847 total over 2 month(s) (avg 423.5/mo). Max plans cap at 50 sessions
 → Best fit: OpenAI Pro at $100/mo — fits within high-usage band
 
 ── Per model ──
-Model             Msgs   In    Out    CacheR  CacheW   Claude $    Codex-Std $  Codex-Pri $  Ratio
-────────────────  ─────  ────  ─────  ──────  ───────  ──────────  ───────────  ───────────  ───────
-Claude Opus 4     9,284  842k  4.1M   1.2B    18.4M    $2,842.51   $331.85      $5,432.18    0.12x
-Claude Sonnet 4   2,731  245k  1.2M   384M    6.1M     $524.63     $192.47      $1,573.22    0.37x
-Claude Haiku 4.5    416   38k  195k   62M     1.2M     $12.87      $28.44       $276.33      2.21x
+Model             Msgs   In    Out    CacheR  CacheW   Claude $  Codex-Std $  Codex-Pri $  Ratio
+────────────────  ─────  ────  ─────  ──────  ───────  ────────  ───────────  ───────────  ─────
+Claude Opus 4     9,284  842k  4.1M   1.2B    18.4M    $821.71   $268.87      $4317.75     0.33x
+Claude Sonnet 4   2,731  245k  1.2M   384M    6.1M     $156.81   $84.43       $1378.46     0.54x
+Claude Haiku 4.5    416   38k  195k   62M     1.2M     $8.71     $13.65       $222.59      1.57x
+TOTAL            12,431  1.12M 5.50M  1.65B   25.7M    $987.23   $366.95      $5918.80     0.37x
 
 ── Per month ──
-Month     Msgs    In    Out    Claude $    Codex-Std $  Ratio
-───────   ─────   ────  ─────  ──────────  ───────────  ───────
-2026-03   3,217   238k  1.2M   $927.32     $156.14      0.17x
-2026-04   9,214   887k  4.3M   $2,452.69   $396.62      0.16x
+Month    Msgs    In    Out    Claude $  Codex-Std $  Ratio
+───────  ─────   ────  ─────  ────────  ───────────  ─────
+2026-03  3,217   238k  1.2M   $255.68   $94.97       0.37x
+2026-04  9,214   887k  4.3M   $731.55   $271.98      0.37x
+TOTAL   12,431  1.12M  5.50M  $987.23   $366.95      0.37x
+
+Ratio column: Codex-Std cost divided by Claude cost on the same tokens.
+  <1.0  → Codex cheaper than Claude on this volume
+  >1.0  → Claude cheaper than Codex on this volume
 ```
 
 The terminal output leads with the subscription verdict (the question you
