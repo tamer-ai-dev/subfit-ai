@@ -71,9 +71,12 @@ depth, keeps only lines where `type === "assistant"` with a
 `message.usage` block, sums the four token counts per model and per
 YYYY-MM, and computes:
 
-1. **What you actually paid to Anthropic** — at Claude API rates for the
-   model that produced each token (Opus / Sonnet / Haiku, with cache-read
-   and cache-creation priced separately).
+1. **What the same tokens would cost at each provider's API rates** —
+   Anthropic rates for Claude models (Opus / Sonnet / Haiku, with
+   cache-read and cache-creation priced separately) and Google rates
+   for Gemini models (Pro / Flash / Flash-Lite). This is a *what-if
+   metered* view, not what you actually paid if you are on a
+   subscription.
 2. **What OpenAI Codex would charge** — at `gpt-5.3-codex` standard and
    priority rates on the same token volume.
 3. **Whether your usage fits under a subscription** — compares your average
@@ -170,7 +173,7 @@ Sessions: 847 total over 2 month(s) (avg 423.5/mo). Max plans cap at 50 sessions
 → Best fit: OpenAI Pro at $100/mo — fits within high-usage band
 
 ── Per model ──
-Model             Msgs   In    Out    CacheR  CacheW   Claude $  Codex-Std $  Codex-Pri $  Ratio
+Model             Msgs   In    Out    CacheR  CacheW   Provider $  Codex-Std $  Codex-Pri $  Ratio
 ────────────────  ─────  ────  ─────  ──────  ───────  ────────  ───────────  ───────────  ─────
 Claude Opus 4     9,284  842k  4.1M   1.2B    18.4M    $821.71   $268.87      $4317.75     0.33x
 Claude Sonnet 4   2,731  245k  1.2M   384M    6.1M     $156.81   $84.43       $1378.46     0.54x
@@ -178,15 +181,15 @@ Claude Haiku 4.5    416   38k  195k   62M     1.2M     $8.71     $13.65       $2
 TOTAL            12,431  1.12M 5.50M  1.65B   25.7M    $987.23   $366.95      $5918.80     0.37x
 
 ── Per month ──
-Month    Msgs    In    Out    Claude $  Codex-Std $  Ratio
+Month    Msgs    In    Out    Provider $  Codex-Std $  Ratio
 ───────  ─────   ────  ─────  ────────  ───────────  ─────
 2026-03  3,217   238k  1.2M   $255.68   $94.97       0.37x
 2026-04  9,214   887k  4.3M   $731.55   $271.98      0.37x
 TOTAL   12,431  1.12M  5.50M  $987.23   $366.95      0.37x
 
-Ratio column: Codex-Std cost divided by Claude cost on the same tokens.
-  <1.0  → Codex cheaper than Claude on this volume
-  >1.0  → Claude cheaper than Codex on this volume
+Ratio column: Codex-Std cost divided by the Provider cost on the same tokens.
+  <1.0  → Codex cheaper than the native provider on this volume
+  >1.0  → Native provider cheaper than Codex on this volume
 ```
 
 The terminal output leads with the subscription verdict (the question you
@@ -258,13 +261,14 @@ If `config.json` is missing or malformed, `subfit-ai` falls back to an
 embedded snapshot (`default-config.json`) and keeps running — the header
 prints `config: embedded defaults`.
 
-**Ratio column**: `Codex-Std $` divided by the Claude cost on the same
-tokens. It is a **cost ratio, not a savings percentage** — `0.12x` means
-Claude cost you 8× what Codex would have cost on that volume, not "12%
+**Ratio column**: `Codex-Std $` divided by the native Provider cost on
+the same tokens. It is a **cost ratio, not a savings percentage** —
+`0.12x` means the provider (Anthropic for Claude models, Google for
+Gemini) cost 8× what Codex would have cost on that volume, not "12%
 savings". Read it as:
 
 - `<1.0` → Codex would have been cheaper on that volume
-- `>1.0` → Claude was the cheaper provider
+- `>1.0` → The native provider was the cheaper one
 
 `cache_read_input_tokens` is usually the dominant count in Claude
 sessions (reading cached context); the comparison is apples-to-apples

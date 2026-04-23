@@ -648,7 +648,7 @@ function renderTable(header: string[], body: string[][]): string[] {
 function renderModelSection(rows: ModelRow[]): string {
   if (rows.length === 0) return "No assistant messages with usage found.\n";
 
-  const header = ["Model", "Msgs", "In", "Out", "CacheR", "CacheW", "Claude $", "Codex-Std $", "Codex-Pri $", "Ratio"];
+  const header = ["Model", "Msgs", "In", "Out", "CacheR", "CacheW", "Provider $", "Codex-Std $", "Codex-Pri $", "Ratio"];
   const body: string[][] = rows.map(r => [
     r.label, String(r.totals.messageCount),
     fmtTokens(r.totals.inputTokens), fmtTokens(r.totals.outputTokens),
@@ -962,7 +962,7 @@ function renderScanSummary(providers: ProviderStats[], configSource: string): st
 function renderMonthlySection(byMonth: Map<string, Map<string, ModelTotals>>, pricing: Record<string, ModelPricing>): string {
   if (byMonth.size === 0) return "No timestamped messages for monthly breakdown.\n";
 
-  const header = ["Month", "Msgs", "In", "Out", "CacheR", "CacheW", "Claude $", "Codex-Std $", "Ratio"];
+  const header = ["Month", "Msgs", "In", "Out", "CacheR", "CacheW", "Provider $", "Codex-Std $", "Ratio"];
   const codexStd = pricing["codex-standard"] ?? null;
   const months = [...byMonth.keys()].sort();
   const body: string[][] = [];
@@ -1050,7 +1050,7 @@ export function renderMarkdown(inp: MarkdownInput): string {
   if (inp.byMonth.size === 0 || !codexStd) {
     out.push("_No timestamped messages available._");
   } else {
-    out.push(gfmRow(["Month", "Tokens In", "Tokens Out", "Claude $", "Codex $"]));
+    out.push(gfmRow(["Month", "Tokens In", "Tokens Out", "Provider $", "Codex $"]));
     out.push(gfmSep(5));
     const months = [...inp.byMonth.keys()].sort();
     let totIn = 0, totOut = 0, totC = 0, totX = 0;
@@ -1081,7 +1081,7 @@ export function renderMarkdown(inp: MarkdownInput): string {
   if (inp.rows.length === 0) {
     out.push("_No assistant messages with usage found._");
   } else {
-    out.push(gfmRow(["Model", "Msgs", "Input", "Output", "Cache R", "Cache W", "Claude $", "Codex Std $", "Codex Pri $", "Ratio"]));
+    out.push(gfmRow(["Model", "Msgs", "Input", "Output", "Cache R", "Cache W", "Provider $", "Codex Std $", "Codex Pri $", "Ratio"]));
     out.push(gfmSep(10));
     for (const r of inp.rows) {
       out.push(gfmRow([
@@ -1309,9 +1309,9 @@ function main(): number {
     out.push("── Per month ──");
     out.push(renderMonthlySection(ctx.byMonth, pricing));
   }
-  out.push("Ratio column: Codex-Std cost divided by Claude cost on the same tokens.");
-  out.push("  <1.0  → Codex cheaper than Claude on this volume");
-  out.push("  >1.0  → Claude cheaper than Codex on this volume");
+  out.push("Ratio column: Codex-Std cost divided by the Provider cost on the same tokens.");
+  out.push("  <1.0  → Codex cheaper than the native provider on this volume");
+  out.push("  >1.0  → Native provider cheaper than Codex on this volume");
   process.stdout.write(out.join("\n") + "\n");
 
   // --export: write GFM markdown report alongside the terminal output
