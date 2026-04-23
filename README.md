@@ -8,13 +8,14 @@
 
 ## What it does
 
-`subfit-ai` scans your local **Claude Code**, **Gemini CLI**, and
-**Mistral Vibe CLI** session history, prices the same token volume on
-OpenAI Codex, and checks which subscription tier — Claude Pro / Max 5x
-/ Max 20x / Team / Enterprise, or OpenAI Plus / Pro / Pro 20x — your
-real 5-hour usage actually fits into. It runs entirely offline against
-the session files (JSONL for Claude, JSON/JSONL for Gemini and Vibe)
-the three CLIs already write to disk.
+`subfit-ai` scans your local **Claude Code**, **Gemini CLI**, **Mistral
+Vibe CLI**, and **OpenAI Codex CLI** session history, prices the same
+token volume on OpenAI Codex rates, and checks which subscription tier
+— Claude Pro / Max 5x / Max 20x / Team / Enterprise, or OpenAI Plus /
+Pro / Pro 20x — your real 5-hour usage actually fits into. It runs
+entirely offline against the session files (JSONL for Claude,
+JSON/JSONL for Gemini, Vibe, and Codex) the four CLIs already write to
+disk.
 
 ## How it works
 
@@ -34,8 +35,18 @@ in parallel and merged into a single report:
   line-by-line JSONL and maps the Mistral API `usage` block —
   `prompt_tokens` / `completion_tokens` / `cached_tokens`). Honours
   `$VIBE_HOME` if set. See `docs/studies/STUDY-vibe-tokens.md`.
+- **OpenAI Codex CLI** writes session transcripts under
+  `~/.codex/sessions/` (or `history/`), again in a shape that is
+  [not verified][codex-unverified] here; the scanner probes JSON and
+  JSONL and maps the OpenAI Responses-API `usage` block —
+  `input_tokens` / `output_tokens` /
+  `input_tokens_details.cached_tokens`. The cached subset is
+  subtracted from the total input so the downstream cost math does
+  not double-count. Honours `$CODEX_HOME` if set. See
+  `docs/studies/STUDY-codex-tokens.md`.
 
 [vibe-unverified]: docs/studies/STUDY-vibe-tokens.md#4-session-file-format--unverified
+[codex-unverified]: docs/studies/STUDY-codex-tokens.md#3-session-file-format--unverified
 
 **`subfit-ai` makes no network calls at runtime.** The Docker image and
 the `npx` invocation both download dependencies (`tsx`, `vitest`, etc.)
@@ -110,11 +121,12 @@ YYYY-MM, and computes:
 Run with `npx tsx` (no install needed — requires Node 18+):
 
 ```bash
-npx tsx ./subfit-ai.ts                         # scan ~/.claude, ~/.gemini AND ~/.vibe
+npx tsx ./subfit-ai.ts                         # scan ~/.claude, ~/.gemini, ~/.vibe AND ~/.codex
 npx tsx ./subfit-ai.ts --demo                  # use bundled examples/sample.jsonl
 npx tsx ./subfit-ai.ts --path /custom          # override the Claude scan root
 npx tsx ./subfit-ai.ts --gemini-path /other    # override the Gemini scan root
 npx tsx ./subfit-ai.ts --vibe-path /elsewhere  # override the Vibe scan root
+npx tsx ./subfit-ai.ts --codex-path /foo       # override the Codex scan root
 npx tsx ./subfit-ai.ts --config my.json        # custom pricing / plan file
 npx tsx ./subfit-ai.ts --json             # machine-readable output
 npx tsx ./subfit-ai.ts --no-monthly       # skip the per-month table
@@ -145,6 +157,7 @@ on Windows — npm generates a `.cmd` wrapper that calls `tsx` directly.
 | `--path <dir>` | `~/.claude` | Claude Code scan root — recursively globs `*.jsonl` |
 | `--gemini-path <dir>` | `~/.gemini` | Gemini CLI scan root — globs `tmp/<slug>/chats/session-*.json`; skipped silently if missing |
 | `--vibe-path <dir>` | `$VIBE_HOME` or `~/.vibe` | Mistral Vibe CLI scan root — recursively globs `logs/**/*.{json,jsonl}`; skipped silently if missing |
+| `--codex-path <dir>` | `$CODEX_HOME` or `~/.codex` | OpenAI Codex CLI scan root — prefers `sessions/` / `history/` for `*.{json,jsonl}`, falls back to a root scan; skipped silently if missing |
 | `--config <file>` | `./config.json` | Pricing + plan-limits config; falls back to the embedded `default-config.json` if missing or malformed |
 | `--json` | off | Emit a single JSON object instead of terminal tables |
 | `--no-monthly` | off | Skip the YYYY-MM breakdown |
