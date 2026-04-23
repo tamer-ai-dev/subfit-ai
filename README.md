@@ -333,17 +333,58 @@ chat, let it research, and replace **both** `config.json` and
 `default-config.json` with the JSON it returns.
 
 ```
-Give me the current pricing for:
-1. Claude API models (Opus, Sonnet, Haiku) — input, output, cache read, cache write rates per 1M tokens
-2. OpenAI Codex (latest model) — standard and priority tiers, input, output, cache read rates per 1M tokens
-3. Subscription plans: Claude Pro, Claude Max 5x, Claude Max 20x, Claude Team, Claude Enterprise — monthly price, messages per 5h window (use [min, null] for baseline-only limits like Max), session caps
-4. OpenAI Plus, Pro, Pro 20x — monthly price, messages per 5h window
+Refresh the `subfit-ai` pricing snapshot. Research from these canonical
+sources (open each one and cross-reference against recent changelog /
+blog posts — pricing pages often lag behind announcements):
 
-Format the result as a JSON matching this structure:
+  Claude API models .............. https://docs.anthropic.com/en/docs/about-claude/pricing
+  Claude subscriptions ........... https://support.anthropic.com/en/articles/11014257
+  OpenAI Codex ................... https://developers.openai.com/codex/pricing
+  OpenAI subscriptions (Plus/Pro). https://openai.com/pricing
+  Gemini ......................... https://ai.google.dev/gemini-api/docs/pricing
+  Mistral / Vibe ................. https://mistral.ai/pricing
+
+Return:
+
+1. Per-model token pricing (USD per 1M tokens), with a separate `cacheRead` and
+   `cacheWrite` field where the provider breaks cache tiers out:
+     Claude ........ Opus, Sonnet, Haiku (current minor versions)
+     OpenAI Codex .. GPT-5.x Codex standard AND priority (or priority==null)
+     Gemini ........ 2.5 Pro, 2.5 Flash, 2.5 Flash-Lite
+     Mistral ....... Devstral 2, Devstral Small 2
+
+2. Subscription plans with monthly price, 5-hour message limits, and session
+   caps for each:
+     Claude ........ Pro, Max 5x, Max 20x, Team, Enterprise
+     OpenAI ........ Plus, Pro, Pro 20x
+     Mistral ....... Free, Pro, Team, Enterprise
+
+3. Check carefully for subtleties before reporting a rate:
+   • **Cache tiers by duration** — some providers charge different rates for
+     short (5 min) vs long (1 h) cache entries. Capture the most common tier.
+   • **Batch API discounts** — usually a flat 50% off listed rates, sometimes
+     not available on every model. Note this in the `note` field if it applies.
+   • **Long-context multipliers** — Gemini 2.5 Pro doubles above 200K ctx.
+     Claude and OpenAI occasionally add similar bands. Capture the ≤200K rate
+     as the primary; mention the long-context band in `note`.
+   • **Free tier vs paid tier limits** — the free-tier message cap is often
+     advertised as "per day" rather than "per 5h"; normalize it into
+     messagesPer5h: [lo, null] (baseline with no published ceiling) and
+     record the original phrasing in `note`.
+   • **Session / monthly caps** — Claude Max ships a 50 sessions/mo cap that
+     is separate from the 5h limit. Capture it in `sessionsCap`.
+   • **Recent changes** — scan the last 30 days of each provider's blog /
+     changelog. The pricing page is sometimes stale by several weeks.
+
+4. Format the JSON result to match the existing config shape exactly:
 {
-  "pricing": { "<model-key>": { "label": "...", "input": N, "output": N, "cacheRead": N, "cacheWrite": N } },
-  "planLimits": { "<plan-key>": { "label": "...", "monthlyUsd": N|null, "messagesPer5h": [lo,hi]|[lo,null]|null, "sessionsCap": N|null, "note": "..." } }
+  "pricing": { "<model-key>": { "label": "...", "input": N, "output": N, "cacheRead": N, "cacheWrite": N, "_source": "<url>" } },
+  "planLimits": { "<plan-key>": { "label": "...", "monthlyUsd": N|null, "messagesPer5h": [lo,hi]|[lo,null]|null, "sessionsCap": N|null, "note": "...", "_source": "<url>" } }
 }
+
+Include a `_source` URL on every entry. If a number is unverified after
+cross-referencing, flag it in `note` with "unverified, check <url>" rather
+than guessing.
 ```
 
 Keep the two files byte-identical — `config.json` is what users edit,
@@ -357,6 +398,16 @@ The `225+` / `900+` baselines on Claude Max 5x / 20x come directly from
 that article. The Claude Max entries in both config files carry a
 `_source` field pointing to this article so the provenance stays visible
 inside the config.
+
+### Future: quality-adjusted comparison (TODO)
+
+Raw token pricing does not tell the whole story. A $0.40/M model that
+needs 3× more rounds to produce working code is not actually cheaper
+than a $5/M model that gets it right first try. A future version
+should include a quality / efficiency weighting factor — e.g.
+"effective cost per successful task" — informed by community
+benchmarks (SWE-bench, Aider leaderboard, etc.). Contributions
+welcome.
 
 ## Comparison landscape
 
