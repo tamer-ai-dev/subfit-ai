@@ -70,18 +70,31 @@ describe("findOpenCodeSessions", () => {
     expect(findOpenCodeSessions(join(tmpRoot, "does-not-exist"))).toEqual([]);
   });
 
-  it("prefers storage/session/** when present and picks up ses_*.json files", () => {
-    mkdirSync(join(tmpRoot, "storage/session/proj-abc"), { recursive: true });
-    mkdirSync(join(tmpRoot, "storage/session/proj-def"), { recursive: true });
-    writeFileSync(join(tmpRoot, "storage/session/proj-abc/ses_1.json"), "{}");
-    writeFileSync(join(tmpRoot, "storage/session/proj-def/ses_2.json"), "{}");
-    // Noise under the root — must not be picked up when storage/session exists.
-    writeFileSync(join(tmpRoot, "opencode.db"), "SQLITE_BINARY");
+  it("prefers storage/session/message/** and ignores sibling info/ & part/ subtrees", () => {
+    // Real OpenCode layout: info/ holds session metadata (no tokens),
+    // message/ holds per-message records (the only files we want), and
+    // part/ holds content elements (no tokens). Walking all three
+    // inflated totalLines / parseErrors in production.
+    mkdirSync(join(tmpRoot, "storage/session/info"), { recursive: true });
+    mkdirSync(join(tmpRoot, "storage/session/message/ses_abc"), { recursive: true });
+    mkdirSync(join(tmpRoot, "storage/session/part/ses_abc/msg_1"), { recursive: true });
+    writeFileSync(join(tmpRoot, "storage/session/info/ses_abc.json"), "{}");
+    writeFileSync(join(tmpRoot, "storage/session/message/ses_abc/msg_1.json"), "{}");
+    writeFileSync(join(tmpRoot, "storage/session/message/ses_abc/msg_2.json"), "{}");
+    writeFileSync(join(tmpRoot, "storage/session/part/ses_abc/msg_1/part_1.json"), "{}");
 
     const out = findOpenCodeSessions(tmpRoot).sort();
     expect(out).toHaveLength(2);
-    expect(out.every(p => p.includes("/storage/session/"))).toBe(true);
-    expect(out.every(p => /ses_\d+\.json$/.test(p))).toBe(true);
+    expect(out.every(p => p.includes("/storage/session/message/"))).toBe(true);
+    expect(out.every(p => !p.includes("/info/") && !p.includes("/part/"))).toBe(true);
+  });
+
+  it("falls back to storage/session/** when the message/ subtree is absent", () => {
+    mkdirSync(join(tmpRoot, "storage/session"), { recursive: true });
+    writeFileSync(join(tmpRoot, "storage/session/loose.json"), "{}");
+    const out = findOpenCodeSessions(tmpRoot);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatch(/loose\.json$/);
   });
 
   it("falls back to a root scan and skips opencode.db / log when storage/session is absent", () => {
@@ -221,18 +234,88 @@ describe("scanOpenCodeSession", () => {
     expect(ctx.unknownCodexModels.size).toBe(0);
   });
 
-  it("honors nested `message.usage` and `parts` array shape", () => {
+  it("parses the real OpenCode message shape (top-level object, normalized tokens)", () => {
+    // This is the actual on-disk shape in ~/.local/share/opencode/storage/
+    // session/message/<ses>/<msg>.json — one message per file, top-level
+    // role/modelID/providerID, `time.created` in milliseconds, and a
+    // normalized `tokens` object that OpenCode populates regardless of
+    // which upstream provider was called.
+    const createdMs = Date.UTC(2026, 3, 23, 10, 0, 0); // 2026-04-23T10:00:00Z
     writeFileSync(tmpFile, JSON.stringify({
-      parts: [
-        { role: "assistant",
-          message: { model: "claude-haiku-4-5",
-                     usage: { input_tokens: 10, output_tokens: 5 } } },
-      ],
+      id: "msg_abc123",
+      role: "assistant",
+      sessionID: "ses_xyz",
+      modelID: "claude-sonnet-4-6",
+      providerID: "anthropic",
+      time: { created: createdMs, completed: createdMs + 5000 },
+      tokens: {
+        input: 1_000,
+        output: 500,
+        reasoning: 0,
+        cache: { read: 4_000, write: 200 },
+      },
+      cost: 0.0321,
+    }));
+    const ctx = freshCtx();
+    scanOpenCodeSession(tmpFile, ctx);
+
+    expect(ctx.assistantLines).toBe(1);
+    expect(ctx.withUsage).toBe(1);
+    const t = ctx.byModel.get("claude-sonnet-4")!;
+    expect(t.inputTokens).toBe(1_000);
+    expect(t.outputTokens).toBe(500);
+    expect(t.cacheReadTokens).toBe(4_000);
+    expect(t.cacheCreationTokens).toBe(200);
+    expect(ctx.minTs).toBe("2026-04-23T10:00:00.000Z");
+    // Unknown sets should NOT be touched for a well-formed turn.
+    expect(ctx.unknownOpenCodeModels.size).toBe(0);
+  });
+
+  it("adds reasoning tokens to output (OpenAI bills reasoning at output rate)", () => {
+    writeFileSync(tmpFile, JSON.stringify({
+      role: "assistant",
+      modelID: "gpt-5.3-codex",
+      providerID: "openai",
+      tokens: { input: 100, output: 50, reasoning: 30,
+                cache: { read: 0, write: 0 } },
+    }));
+    const ctx = freshCtx();
+    scanOpenCodeSession(tmpFile, ctx);
+
+    const t = ctx.byModel.get("codex-standard")!;
+    expect(t.outputTokens).toBe(80);   // 50 + 30 reasoning
+    expect(t.inputTokens).toBe(100);
+  });
+
+  it("unwraps a legacy { info: {...} } wrapper", () => {
+    writeFileSync(tmpFile, JSON.stringify({
+      info: {
+        role: "assistant",
+        modelID: "claude-haiku-4-5",
+        providerID: "anthropic",
+        tokens: { input: 10, output: 5, cache: { read: 0, write: 0 } },
+      },
+      parts: [{ type: "text", text: "ignored" }],
     }));
     const ctx = freshCtx();
     scanOpenCodeSession(tmpFile, ctx);
 
     expect(ctx.withUsage).toBe(1);
     expect(ctx.byModel.get("claude-haiku-4-5")?.inputTokens).toBe(10);
+  });
+
+  it("skips user-role messages (no role:assistant → no token charge)", () => {
+    writeFileSync(tmpFile, JSON.stringify({
+      role: "user",
+      sessionID: "ses_xyz",
+      time: { created: Date.now() },
+    }));
+    const ctx = freshCtx();
+    scanOpenCodeSession(tmpFile, ctx);
+
+    expect(ctx.totalLines).toBe(1);
+    expect(ctx.assistantLines).toBe(0);
+    expect(ctx.withUsage).toBe(0);
+    expect(ctx.byModel.size).toBe(0);
   });
 });

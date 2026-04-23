@@ -967,26 +967,45 @@ export function scanCodexSession(filePath: string, ctx: ScanContext): void {
 // OpenCode CLI session scanner. OpenCode is BYOK — each session can route
 // to Anthropic, Google, OpenAI, or Mistral — so the scanner dispatches per
 // turn rather than assuming a single provider. See
-// docs/studies/STUDY-opencode-tokens.md for the on-disk layout (the exact
-// shape of per-turn usage blocks is [UNVERIFIED] at time of writing).
+// docs/studies/STUDY-opencode-tokens.md for the on-disk layout.
 //
-// Sessions live at:
-//   $OPENCODE_HOME/storage/session/<project-hash>/ses_<session_id>.json
-// (default root ~/.local/share/opencode). The scanner prefers that subtree
-// when present and falls back to a whole-root walk so a non-standard
-// layout still works.
+// On-disk layout (confirmed against the upstream source,
+// packages/opencode/src/session/message.ts in github.com/sst/opencode):
+//
+//   $OPENCODE_HOME/storage/session/
+//     info/<sessionID>.json             ← session metadata (no role field)
+//     message/<sessionID>/<messageID>.json  ← ONE message per file
+//     part/<sessionID>/<messageID>/<partID>.json  ← parts (no tokens)
+//
+// Each message file is a SINGLE top-level object with:
+//   { id, role: "assistant"|"user", sessionID, modelID, providerID,
+//     time: { created: <ms-since-epoch> },
+//     tokens: { input, output, reasoning, cache: { read, write } }, cost }
+//
+// The scanner deliberately walks ONLY the `message/` subtree — pulling in
+// `info/` or `part/` files bloats totalLines with 0 matches and trips JSON
+// parse failures on binary-ish part content.
 // ───────────────────────────────────────────────────────────────────────────
 
-/** Walk OpenCode root for per-session JSON transcripts. Prefers
- *  `storage/session/**` when present; falls back to scanning the whole root
- *  minus the SQLite database and log dir. Returns [] if the root is missing
- *  so the caller can skip OpenCode silently. */
+/** Walk OpenCode root for per-message JSON transcripts. Prefers
+ *  `storage/session/message/**` (the only subtree with role+tokens); falls
+ *  back to `storage/session/**` then the whole root so a non-standard
+ *  layout still works. Returns [] if the root is missing so the caller
+ *  can skip OpenCode silently. */
 export function findOpenCodeSessions(root: string): string[] {
   const files: string[] = [];
   if (!existsSync(root)) return files;
 
-  const preferred = join(root, "storage", "session");
-  const starts = existsSync(preferred) ? [preferred] : [root];
+  // Prefer the narrowest path that actually exists. `message/` is the only
+  // subtree carrying per-turn token counts; `info/` and `part/` live as
+  // siblings and have no usage data, so including them just inflates
+  // totalLines / parseErrors without finding anything to price.
+  const messageDir = join(root, "storage", "session", "message");
+  const sessionDir = join(root, "storage", "session");
+  let starts: string[];
+  if (existsSync(messageDir))      starts = [messageDir];
+  else if (existsSync(sessionDir)) starts = [sessionDir];
+  else                             starts = [root];
 
   const seen = new Set<string>();
   const stack: Array<[string, number]> = starts.map(s => [s, 0]);
@@ -1006,8 +1025,6 @@ export function findOpenCodeSessions(root: string): string[] {
       let sub;
       try { sub = statSync(p); } catch { continue; }
       if (sub.isDirectory()) stack.push([p, depth + 1]);
-      // Session JSONs follow the `ses_*.json` convention, but accept any
-      // *.json under the preferred subtree so newer layouts still work.
       else if (sub.isFile() && name.endsWith(".json")) files.push(p);
     }
   }
@@ -1069,22 +1086,24 @@ export function normalizeOpenCodeModel(
   return { key: "claude-opus-4", matched: false, provider: "unknown" };
 }
 
-/** Parse one OpenCode session file and fold its assistant turns into the
- *  shared ScanContext. Accepts a full-JSON object (with a
- *  `messages|parts|turns|history` array) and falls back to JSONL on parse
- *  failure. Each assistant turn is routed to the correct upstream provider
- *  via `normalizeOpenCodeModel`, and usage is extracted in that provider's
- *  documented shape:
+/** Parse one OpenCode message file and fold its assistant turn into the
+ *  shared ScanContext.
  *
- *    Anthropic — input_tokens / output_tokens / cache_read_input_tokens /
- *                cache_creation_input_tokens
- *    OpenAI    — input_tokens(-cached) / output_tokens /
- *                input_tokens_details.cached_tokens
- *    Google    — input / output / cached
- *    Mistral   — prompt_tokens / completion_tokens / cached_tokens
+ *  OpenCode writes ONE message per file — the top-level object is the
+ *  `MessageV2.Info` record, with `role`, `modelID`, `providerID`,
+ *  `time.created` (ms since epoch), and a normalised `tokens` block:
  *
- *  Unknown providers fall back to a permissive union of all four shapes so
- *  a mis-tagged turn isn't silently zeroed. */
+ *    tokens: { input, output, reasoning, cache: { read, write } }
+ *
+ *  That single normalised shape is OpenCode's contract, so we read it
+ *  directly — no per-upstream-provider dispatch needed for tokens. The
+ *  provider tag is still used to pick the pricing bucket via
+ *  `normalizeOpenCodeModel` (anthropic→claude-*, openai→codex-*, etc.).
+ *
+ *  Legacy / wrapped / JSONL shapes are tolerated as fallbacks:
+ *    - `{ info: {...} }` wrapping (older sessions) — unwrap the info object
+ *    - top-level `parts/messages/turns/history` array — iterate as turns
+ *    - `turn.usage` in upstream-provider shape — dispatch by provider */
 export function scanOpenCodeSession(filePath: string, ctx: ScanContext): void {
   if (fileTooLarge(filePath)) return;
   let content: string;
@@ -1093,10 +1112,20 @@ export function scanOpenCodeSession(filePath: string, ctx: ScanContext): void {
 
   let turns: any[] = [];
   try {
-    const parsed = JSON.parse(content);
-    if (Array.isArray(parsed)) turns = parsed;
+    let parsed = JSON.parse(content);
+    // OpenCode's primary shape: the file IS the message. Any top-level
+    // object with a `role` string is treated as a single turn — never
+    // descend into sibling arrays like `parts` (which are content
+    // elements, not assistant turns).
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        && typeof parsed.role === "string") {
+      turns = [parsed];
+    } else if (parsed?.info && typeof parsed.info === "object"
+               && typeof parsed.info.role === "string") {
+      // Some wrappers use { info: { role, tokens, ... }, parts: [...] }.
+      turns = [parsed.info];
+    } else if (Array.isArray(parsed)) turns = parsed;
     else if (Array.isArray(parsed?.messages)) turns = parsed.messages;
-    else if (Array.isArray(parsed?.parts)) turns = parsed.parts;
     else if (Array.isArray(parsed?.turns)) turns = parsed.turns;
     else if (Array.isArray(parsed?.history)) turns = parsed.history;
     else turns = [parsed];
@@ -1118,31 +1147,39 @@ export function scanOpenCodeSession(filePath: string, ctx: ScanContext): void {
     if (!isAssistant && turn?.role !== "assistant") continue;
     ctx.assistantLines++;
 
-    const usage =
-      turn.usage ??
-      turn.message?.usage ??
-      turn.response?.usage ??
-      turn.tokens ??
-      null;
+    // OpenCode's normalised shape takes priority: a tokens object whose
+    // children look like OpenCode's fields (plain integers or a `cache`
+    // sub-object). Only fall through to upstream-provider usage blocks
+    // when that shape isn't present.
+    const ocTokens =
+      turn.tokens && typeof turn.tokens === "object" && !Array.isArray(turn.tokens)
+        && (typeof turn.tokens.input === "number"
+            || typeof turn.tokens.output === "number"
+            || (turn.tokens.cache && typeof turn.tokens.cache === "object"))
+        ? turn.tokens : null;
+    const usage = ocTokens ?? turn.usage ?? turn.message?.usage ?? turn.response?.usage ?? null;
     if (!usage) continue;
     ctx.withUsage++;
 
-    // Model / provider can live at the turn, in a nested message/response,
-    // or as a `providerID` / `modelID` pair (OpenCode's documented config
-    // keys). Probe each location in order.
+    // Model / provider can live at the turn level (OpenCode's
+    // `modelID` / `providerID`), in a nested message/response, or under
+    // a generic `model` / `provider` alias.
     const rawModel: string | undefined =
+      turn.modelID ??
       turn.model ??
       turn.message?.model ??
-      turn.response?.model ??
-      turn.modelID;
+      turn.response?.model;
     const rawProvider: string | undefined =
-      turn.provider ??
       turn.providerID ??
+      turn.provider ??
       turn.message?.provider ??
       turn.response?.provider;
     const { key: model, matched, provider } = normalizeOpenCodeModel(rawModel, rawProvider);
     if (!matched && typeof rawModel === "string" && rawModel) ctx.unknownOpenCodeModels.add(rawModel);
 
+    // OpenCode stamps `time.created` in MILLISECONDS (JS Date.now()).
+    // Other shapes may carry `timestamp` / `created_at` ISO strings, or a
+    // seconds-since-epoch `created` number (Responses API style).
     const ts: string | undefined =
       turn.timestamp ??
       turn.created_at ??
@@ -1152,7 +1189,17 @@ export function scanOpenCodeSession(filePath: string, ctx: ScanContext): void {
     if (ts && (!ctx.maxTs || ts > ctx.maxTs)) ctx.maxTs = ts;
 
     const addInto = (t: ModelTotals) => {
-      if (provider === "anthropic") {
+      if (ocTokens) {
+        // OpenCode's normalised shape: { input, output, reasoning,
+        // cache: { read, write } }. Reasoning tokens are counted as
+        // output for pricing (OpenAI bills them at the output rate, and
+        // Anthropic folds them into output_tokens at wire time).
+        const cache = (ocTokens.cache && typeof ocTokens.cache === "object") ? ocTokens.cache : {};
+        t.inputTokens        += ocTokens.input ?? 0;
+        t.outputTokens       += (ocTokens.output ?? 0) + (ocTokens.reasoning ?? 0);
+        t.cacheReadTokens    += cache.read ?? 0;
+        t.cacheCreationTokens += cache.write ?? 0;
+      } else if (provider === "anthropic") {
         t.inputTokens        += usage.input_tokens ?? 0;
         t.outputTokens       += usage.output_tokens ?? 0;
         t.cacheReadTokens    += usage.cache_read_input_tokens ?? 0;
@@ -1172,8 +1219,8 @@ export function scanOpenCodeSession(filePath: string, ctx: ScanContext): void {
         t.outputTokens    += usage.completion_tokens ?? usage.output_tokens ?? usage.output ?? 0;
         t.cacheReadTokens += usage.cached_tokens ?? usage.cache_read_input_tokens ?? usage.cached ?? 0;
       } else {
-        // Unknown provider — permissive union so a new provider OpenCode
-        // adds upstream doesn't silently zero usage until we ship a mapping.
+        // Unknown provider — permissive union so a new upstream doesn't
+        // silently zero usage until we ship a mapping.
         t.inputTokens        += usage.input_tokens ?? usage.prompt_tokens ?? usage.input ?? 0;
         t.outputTokens       += usage.output_tokens ?? usage.completion_tokens ?? usage.output ?? 0;
         t.cacheReadTokens    += usage.cache_read_input_tokens ?? usage.cached_tokens ?? usage.cached ?? 0;
