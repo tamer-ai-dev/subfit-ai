@@ -334,6 +334,10 @@ Keep PRs focused (one change set per PR), update the `_source` fields
 when you bump numbers, and rerun `subfit-ai --json` to sanity-check any
 config change before committing.
 
+---
+
+Built with [Claude Code](https://claude.ai/code) by Anthropic.
+
 ## License
 
 MIT — see [LICENSE](./LICENSE).
