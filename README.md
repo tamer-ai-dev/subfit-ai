@@ -219,11 +219,14 @@ Rates and plan caps live in **`config.json`** next to the script:
 ```json
 {
   "pricing": {
-    "claude-opus-4":    { "label": "Claude Opus 4", "input": 15.0, "output": 75.0, "cacheRead": 1.5, "cacheWrite": 18.75 },
-    "claude-sonnet-4":  { "label": "Claude Sonnet 4", "input": 3.0, "output": 15.0, "cacheRead": 0.3, "cacheWrite": 3.75 },
-    "claude-haiku-4-5": { "label": "Claude Haiku 4.5", "input": 0.80, "output": 4.0, "cacheRead": 0.08, "cacheWrite": 1.0 },
+    "claude-opus-4":    { "label": "Claude Opus 4", "input": 5.0, "output": 25.0, "cacheRead": 0.50, "cacheWrite": 6.25 },
+    "claude-sonnet-4":  { "label": "Claude Sonnet 4", "input": 3.0, "output": 15.0, "cacheRead": 0.30, "cacheWrite": 3.75 },
+    "claude-haiku-4-5": { "label": "Claude Haiku 4.5", "input": 1.0, "output": 5.0, "cacheRead": 0.10, "cacheWrite": 1.25 },
     "codex-standard":   { "label": "OpenAI Codex (gpt-5.3-codex) standard", "input": 1.75, "cacheRead": 0.175, "cacheWrite": 0, "output": 14.0 },
-    "codex-priority":   { "label": "OpenAI Codex (gpt-5.3-codex) priority", "input": 3.50, "cacheWrite": 0, "output": 28.0 }
+    "codex-priority":   { "label": "OpenAI Codex (gpt-5.3-codex) priority", "input": 3.50, "cacheWrite": 0, "output": 28.0 },
+    "gemini-pro":        { "label": "Gemini 2.5 Pro",        "input": 1.00, "output": 10.00, "cacheRead": 0.10, "cacheWrite": 0 },
+    "gemini-flash":      { "label": "Gemini 2.5 Flash",      "input": 0.30, "output": 2.50,  "cacheRead": 0.03, "cacheWrite": 0 },
+    "gemini-flash-lite": { "label": "Gemini 2.5 Flash-Lite", "input": 0.10, "output": 0.40,  "cacheRead": 0.01, "cacheWrite": 0 }
   },
   "planLimits": {
     "claude-pro":        { "label": "Claude Pro",        "monthlyUsd": 20,   "messagesPer5h": [10, 45] },
@@ -237,6 +240,11 @@ Rates and plan caps live in **`config.json`** next to the script:
   }
 }
 ```
+
+> The real `config.json` / `default-config.json` also carry `_source`
+> URLs on each Claude, Gemini, and OpenAI-plan entry (Anthropic support
+> article / Gemini pricing page / OpenAI pricing page) — omitted here
+> for readability.
 
 All rates are **USD per 1M tokens**. `cacheRead` and `cacheWrite` fall back
 to `input` if omitted. For plan limits:
