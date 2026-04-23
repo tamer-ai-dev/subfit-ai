@@ -14,7 +14,7 @@ Example:
 ```json
 {
   "projects": {
-    "/mnt/d/doc/devs/linux-local/Cazallis/tamer.ai/tools/subfit-ai": "subfit-ai"
+    "/path/to/workspace/subfit-ai": "subfit-ai"
   }
 }
 ```
