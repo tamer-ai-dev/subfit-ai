@@ -1152,8 +1152,14 @@ function main(): number {
     process.stderr.write(`  (run with --help to see supported options)\n`);
   }
 
-  // --demo overrides --path with the bundled sample fixture.
-  if (args.demo) args.path = join(scriptDir(), "examples");
+  // --demo overrides both scan roots with bundled fixtures. The Gemini
+  // override points at examples-gemini/ which may or may not exist — if it
+  // doesn't, the Gemini scan is skipped silently (the normal missing-root
+  // behavior), so --demo never bleeds into a user's real ~/.gemini data.
+  if (args.demo) {
+    args.path = join(scriptDir(), "examples");
+    args.geminiPath = join(scriptDir(), "examples-gemini");
+  }
 
   // Abort only when NEITHER provider root exists — Gemini is opt-in, so a
   // Claude-less machine with ~/.gemini present should still work.
