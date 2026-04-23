@@ -9,13 +9,14 @@
 ## What it does
 
 `subfit-ai` scans your local **Claude Code**, **Gemini CLI**, **Mistral
-Vibe CLI**, and **OpenAI Codex CLI** session history, prices the same
-token volume on OpenAI Codex rates, and checks which subscription tier
+Vibe CLI**, **OpenAI Codex CLI**, and **OpenCode CLI** session history,
+prices the same token volume on OpenAI Codex rates, and checks which
+subscription tier
 — Claude Pro / Max 5x / Max 20x / Team / Enterprise, or OpenAI Plus /
 Pro / Pro 20x — your real 5-hour usage actually fits into. It runs
 entirely offline against the session files (JSONL for Claude,
-JSON/JSONL for Gemini, Vibe, and Codex) the four CLIs already write to
-disk.
+JSON/JSONL for Gemini, Vibe, Codex, and OpenCode) the five CLIs already
+write to disk.
 
 ## Report
 ```
@@ -77,9 +78,19 @@ in parallel and merged into a single report:
   subtracted from the total input so the downstream cost math does
   not double-count. Honours `$CODEX_HOME` if set. See
   `docs/studies/STUDY-codex-tokens.md`.
+- **OpenCode CLI** writes per-session JSON under
+  `~/.local/share/opencode/storage/session/<project-hash>/ses_*.json`.
+  The on-disk shape is [not verified][opencode-unverified] here;
+  OpenCode is **BYOK**, so each turn is routed to the upstream provider
+  it actually hit (Anthropic / Google / OpenAI / Mistral) via an
+  explicit `provider` hint on the turn or a fallback model-string
+  sniff, and the usage block is then read in that provider's shape.
+  Honours `$OPENCODE_HOME` if set. See
+  `docs/studies/STUDY-opencode-tokens.md`.
 
 [vibe-unverified]: docs/studies/STUDY-vibe-tokens.md#4-session-file-format--unverified
 [codex-unverified]: docs/studies/STUDY-codex-tokens.md#3-session-file-format--unverified
+[opencode-unverified]: docs/studies/STUDY-opencode-tokens.md#3-token-data-format--unverified
 
 **`subfit-ai` makes no network calls at runtime.** The Docker image and
 the `npx` invocation both download dependencies (`tsx`, `vitest`, etc.)
@@ -154,12 +165,13 @@ YYYY-MM, and computes:
 Run with `npx tsx` (no install needed — requires Node 18+):
 
 ```bash
-npx tsx ./subfit-ai.ts                         # scan ~/.claude, ~/.gemini, ~/.vibe AND ~/.codex
-npx tsx ./subfit-ai.ts --demo                  # use bundled examples/sample.jsonl
-npx tsx ./subfit-ai.ts --path /custom          # override the Claude scan root
-npx tsx ./subfit-ai.ts --gemini-path /other    # override the Gemini scan root
-npx tsx ./subfit-ai.ts --vibe-path /elsewhere  # override the Vibe scan root
-npx tsx ./subfit-ai.ts --codex-path /foo       # override the Codex scan root
+npx tsx ./subfit-ai.ts                           # scan ~/.claude, ~/.gemini, ~/.vibe, ~/.codex AND ~/.local/share/opencode
+npx tsx ./subfit-ai.ts --demo                    # use bundled examples/sample.jsonl
+npx tsx ./subfit-ai.ts --path /custom            # override the Claude scan root
+npx tsx ./subfit-ai.ts --gemini-path /other      # override the Gemini scan root
+npx tsx ./subfit-ai.ts --vibe-path /elsewhere    # override the Vibe scan root
+npx tsx ./subfit-ai.ts --codex-path /foo         # override the Codex scan root
+npx tsx ./subfit-ai.ts --opencode-path /bar      # override the OpenCode scan root
 npx tsx ./subfit-ai.ts --config my.json        # custom pricing / plan file
 npx tsx ./subfit-ai.ts --json             # machine-readable output
 npx tsx ./subfit-ai.ts --no-monthly       # skip the per-month table
@@ -191,6 +203,7 @@ on Windows — npm generates a `.cmd` wrapper that calls `tsx` directly.
 | `--gemini-path <dir>` | `~/.gemini` | Gemini CLI scan root — globs `tmp/<slug>/chats/session-*.json`; skipped silently if missing |
 | `--vibe-path <dir>` | `$VIBE_HOME` or `~/.vibe` | Mistral Vibe CLI scan root — recursively globs `logs/**/*.{json,jsonl}`; skipped silently if missing |
 | `--codex-path <dir>` | `$CODEX_HOME` or `~/.codex` | OpenAI Codex CLI scan root — prefers `sessions/` / `history/` for `*.{json,jsonl}`, falls back to a root scan; skipped silently if missing |
+| `--opencode-path <dir>` | `$OPENCODE_HOME` or `~/.local/share/opencode` | OpenCode CLI scan root — prefers `storage/session/**/ses_*.json`, falls back to a root scan (skipping `opencode.db` / `log/`); BYOK-routed to the upstream provider; skipped silently if missing |
 | `--config <file>` | `./config.json` | Pricing + plan-limits config; falls back to the embedded `default-config.json` if missing or malformed |
 | `--json` | off | Emit a single JSON object instead of terminal tables |
 | `--no-monthly` | off | Skip the YYYY-MM breakdown |
