@@ -2,9 +2,9 @@
   "_comment": "Pricing + subscription limits for tools/subfit-ai/subfit-ai.ts. Edit rates here when providers publish new prices. Script falls back to hard-coded defaults if this file is missing or malformed.",
   "_comment_codex_cacheWrite": "OpenAI Codex has no separate cache-write fee (cached-input discount is the only tier). cacheWrite is set to 0 explicitly so the cacheWrite ?? input fallback in costOn() does not overcharge Codex for cache-creation tokens.",
   "pricing": {
-    "claude-opus-4":    { "label": "Claude Opus 4",    "input": 15.0, "output": 75.0, "cacheRead": 1.5,   "cacheWrite": 18.75 },
-    "claude-sonnet-4":  { "label": "Claude Sonnet 4",  "input": 3.0,  "output": 15.0, "cacheRead": 0.3,   "cacheWrite": 3.75 },
-    "claude-haiku-4-5": { "label": "Claude Haiku 4.5", "input": 0.80, "output": 4.0,  "cacheRead": 0.08,  "cacheWrite": 1.0 },
+    "claude-opus-4":    { "label": "Claude Opus 4",    "input": 5.0,  "output": 25.0, "cacheRead": 0.50,  "cacheWrite": 6.25,  "_source": "https://docs.anthropic.com/en/docs/about-claude/pricing" },
+    "claude-sonnet-4":  { "label": "Claude Sonnet 4",  "input": 3.0,  "output": 15.0, "cacheRead": 0.30,  "cacheWrite": 3.75,  "_source": "https://docs.anthropic.com/en/docs/about-claude/pricing" },
+    "claude-haiku-4-5": { "label": "Claude Haiku 4.5", "input": 1.0,  "output": 5.0,  "cacheRead": 0.10,  "cacheWrite": 1.25,  "_source": "https://docs.anthropic.com/en/docs/about-claude/pricing" },
     "codex-standard":   { "label": "OpenAI Codex (gpt-5.3-codex) standard", "input": 1.75, "cacheRead": 0.175, "cacheWrite": 0, "output": 14.0 },
     "codex-priority":   { "label": "OpenAI Codex (gpt-5.3-codex) priority", "input": 3.50, "cacheWrite": 0, "output": 28.0 }
   },
