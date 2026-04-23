@@ -125,6 +125,8 @@ interface Args {
   vibePath: string;
   /** Root to scan for OpenAI Codex CLI sessions (~/.codex or $CODEX_HOME). Skipped silently if missing. */
   codexPath: string;
+  /** Root to scan for OpenCode CLI sessions (~/.local/share/opencode or $OPENCODE_HOME). Skipped silently if missing. */
+  opencodePath: string;
   json: boolean;
   help: boolean;
   monthly: boolean;
@@ -162,6 +164,7 @@ function parseArgs(argv: string[]): Args {
     geminiPath: join(homedir(), ".gemini"),
     vibePath: process.env.VIBE_HOME ?? join(homedir(), ".vibe"),
     codexPath: process.env.CODEX_HOME ?? join(homedir(), ".codex"),
+    opencodePath: process.env.OPENCODE_HOME ?? join(homedir(), ".local/share/opencode"),
     json: false,
     help: false,
     monthly: true,
@@ -188,6 +191,8 @@ function parseArgs(argv: string[]): Args {
     else if (a.startsWith("--vibe-path=")) args.vibePath = a.slice("--vibe-path=".length);
     else if (a === "--codex-path") args.codexPath = argv[++i] ?? args.codexPath;
     else if (a.startsWith("--codex-path=")) args.codexPath = a.slice("--codex-path=".length);
+    else if (a === "--opencode-path") args.opencodePath = argv[++i] ?? args.opencodePath;
+    else if (a.startsWith("--opencode-path=")) args.opencodePath = a.slice("--opencode-path=".length);
     else if (a === "--config") args.config = argv[++i] ?? null;
     else if (a.startsWith("--config=")) args.config = a.slice("--config=".length);
     else if (a === "--export") {
@@ -227,6 +232,13 @@ OPTIONS
                   Root directory holding OpenAI Codex CLI sessions (default:
                   $CODEX_HOME or ~/.codex). Scans sessions/** and history/**
                   for *.{json,jsonl}. Skipped silently if missing.
+  --opencode-path <dir>
+                  Root directory holding OpenCode CLI sessions (default:
+                  $OPENCODE_HOME or ~/.local/share/opencode). Scans
+                  storage/session/**/ses_*.json. OpenCode is BYOK, so each
+                  turn is priced by the upstream provider it routed to
+                  (Claude / Gemini / Codex / Mistral). Skipped silently if
+                  the directory does not exist.
   --config <file> Path to a pricing/plan-limits JSON (default:
                   <script-dir>/config.json; falls back to built-in defaults
                   if the file is missing or malformed).
@@ -410,6 +422,8 @@ interface ScanContext {
   unknownVibeModels: Set<string>;
   /** Codex wire names (from OpenAI Codex scanner) that didn't match the codex / gpt-5 families. */
   unknownCodexModels: Set<string>;
+  /** Model strings from OpenCode sessions that couldn't be routed to any known provider family. */
+  unknownOpenCodeModels: Set<string>;
 }
 
 function emptyScanContext(): ScanContext {
@@ -422,6 +436,7 @@ function emptyScanContext(): ScanContext {
     unknownGeminiModels: new Set(),
     unknownVibeModels: new Set(),
     unknownCodexModels: new Set(),
+    unknownOpenCodeModels: new Set(),
   };
 }
 
@@ -452,6 +467,7 @@ function mergeContexts(a: ScanContext, b: ScanContext): ScanContext {
     for (const m of src.unknownGeminiModels) out.unknownGeminiModels.add(m);
     for (const m of src.unknownVibeModels)   out.unknownVibeModels.add(m);
     for (const m of src.unknownCodexModels)  out.unknownCodexModels.add(m);
+    for (const m of src.unknownOpenCodeModels) out.unknownOpenCodeModels.add(m);
     for (const [model, t] of src.byModel) {
       const cur = out.byModel.get(model);
       if (!cur) out.byModel.set(model, { ...t });
@@ -929,6 +945,240 @@ export function scanCodexSession(filePath: string, ctx: ScanContext): void {
       t.cacheReadTokens += cached;
       t.outputTokens    += usage.output_tokens ?? usage.completion_tokens ?? 0;
       // Codex has no cache-write tier (cacheWrite:0 in config.json codex-*).
+      t.messageCount++;
+    };
+
+    let mt = ctx.byModel.get(model);
+    if (!mt) { mt = emptyTotals(); ctx.byModel.set(model, mt); }
+    addInto(mt);
+
+    const ym = yearMonth(ts);
+    if (ym) {
+      let monthBucket = ctx.byMonth.get(ym);
+      if (!monthBucket) { monthBucket = new Map(); ctx.byMonth.set(ym, monthBucket); }
+      let mmt = monthBucket.get(model);
+      if (!mmt) { mmt = emptyTotals(); monthBucket.set(model, mmt); }
+      addInto(mmt);
+    }
+  }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// OpenCode CLI session scanner. OpenCode is BYOK — each session can route
+// to Anthropic, Google, OpenAI, or Mistral — so the scanner dispatches per
+// turn rather than assuming a single provider. See
+// docs/studies/STUDY-opencode-tokens.md for the on-disk layout (the exact
+// shape of per-turn usage blocks is [UNVERIFIED] at time of writing).
+//
+// Sessions live at:
+//   $OPENCODE_HOME/storage/session/<project-hash>/ses_<session_id>.json
+// (default root ~/.local/share/opencode). The scanner prefers that subtree
+// when present and falls back to a whole-root walk so a non-standard
+// layout still works.
+// ───────────────────────────────────────────────────────────────────────────
+
+/** Walk OpenCode root for per-session JSON transcripts. Prefers
+ *  `storage/session/**` when present; falls back to scanning the whole root
+ *  minus the SQLite database and log dir. Returns [] if the root is missing
+ *  so the caller can skip OpenCode silently. */
+export function findOpenCodeSessions(root: string): string[] {
+  const files: string[] = [];
+  if (!existsSync(root)) return files;
+
+  const preferred = join(root, "storage", "session");
+  const starts = existsSync(preferred) ? [preferred] : [root];
+
+  const seen = new Set<string>();
+  const stack: Array<[string, number]> = starts.map(s => [s, 0]);
+  while (stack.length > 0) {
+    const [dir, depth] = stack.pop()!;
+    if (seen.has(dir)) continue;
+    seen.add(dir);
+    if (depth > MAX_SCAN_DEPTH) continue;
+    let entries: string[];
+    try { entries = readdirSync(dir); } catch { continue; }
+    for (const name of entries) {
+      // Root-level noise to skip when falling back to a full-root walk:
+      //   opencode.db — SQLite index, binary garbage for our parser
+      //   log/        — rotating log files, no usage data
+      if (dir === root && (name === "opencode.db" || name === "log")) continue;
+      const p = join(dir, name);
+      let sub;
+      try { sub = statSync(p); } catch { continue; }
+      if (sub.isDirectory()) stack.push([p, depth + 1]);
+      // Session JSONs follow the `ses_*.json` convention, but accept any
+      // *.json under the preferred subtree so newer layouts still work.
+      else if (sub.isFile() && name.endsWith(".json")) files.push(p);
+    }
+  }
+  return files;
+}
+
+/** Dispatch an OpenCode turn's `(model, provider)` tuple to one of the
+ *  existing provider-family normalizers. Returns the downstream pricing key
+ *  and a `provider` tag the scanner uses to pick the correct usage-extraction
+ *  shape. An explicit provider hint (from `turn.provider` / `turn.providerID`)
+ *  wins; otherwise we sniff the model string. Returns `provider: "unknown"`
+ *  with `matched: false` when nothing matches so the caller can warn once. */
+export function normalizeOpenCodeModel(
+  model: string | undefined,
+  provider?: string | undefined,
+): { key: string; matched: boolean; provider: "anthropic" | "google" | "openai" | "mistral" | "unknown" } {
+  const p = (provider ?? "").toLowerCase();
+  const m = (model ?? "").toLowerCase();
+
+  // 1. Explicit provider hint — trust it over any model-string heuristic.
+  if (p && (p.includes("anthropic") || p === "claude")) {
+    const r = normalizeModel(model);
+    return { key: r.key, matched: r.matched, provider: "anthropic" };
+  }
+  if (p && (p.includes("google") || p.includes("gemini") || p === "vertex")) {
+    const r = normalizeGeminiModel(model);
+    return { key: r.key, matched: r.matched, provider: "google" };
+  }
+  if (p && (p.includes("mistral") || p.includes("vibe") || p.includes("devstral"))) {
+    const r = normalizeVibeModel(model);
+    return { key: r.key, matched: r.matched, provider: "mistral" };
+  }
+  if (p && (p.includes("openai") || p.includes("codex"))) {
+    const r = normalizeCodexModel(model);
+    return { key: r.key, matched: r.matched, provider: "openai" };
+  }
+
+  // 2. Sniff from the model string. Order matters — "haiku" etc. check first
+  //    so e.g. "claude-haiku-4-5" doesn't get caught by a later branch.
+  if (m.includes("claude") || m.includes("haiku") || m.includes("sonnet") || m.includes("opus")) {
+    const r = normalizeModel(model);
+    return { key: r.key, matched: r.matched, provider: "anthropic" };
+  }
+  if (m.includes("gemini")) {
+    const r = normalizeGeminiModel(model);
+    return { key: r.key, matched: r.matched, provider: "google" };
+  }
+  if (m.includes("devstral") || m.includes("mistral")) {
+    const r = normalizeVibeModel(model);
+    return { key: r.key, matched: r.matched, provider: "mistral" };
+  }
+  if (m.includes("codex") || m.startsWith("gpt-5") || m.startsWith("gpt")) {
+    const r = normalizeCodexModel(model);
+    return { key: r.key, matched: r.matched, provider: "openai" };
+  }
+
+  // Unknown — bucket under claude-opus-4 so rendering has a stable key; the
+  // caller tracks the raw string in ctx.unknownOpenCodeModels and warns.
+  return { key: "claude-opus-4", matched: false, provider: "unknown" };
+}
+
+/** Parse one OpenCode session file and fold its assistant turns into the
+ *  shared ScanContext. Accepts a full-JSON object (with a
+ *  `messages|parts|turns|history` array) and falls back to JSONL on parse
+ *  failure. Each assistant turn is routed to the correct upstream provider
+ *  via `normalizeOpenCodeModel`, and usage is extracted in that provider's
+ *  documented shape:
+ *
+ *    Anthropic — input_tokens / output_tokens / cache_read_input_tokens /
+ *                cache_creation_input_tokens
+ *    OpenAI    — input_tokens(-cached) / output_tokens /
+ *                input_tokens_details.cached_tokens
+ *    Google    — input / output / cached
+ *    Mistral   — prompt_tokens / completion_tokens / cached_tokens
+ *
+ *  Unknown providers fall back to a permissive union of all four shapes so
+ *  a mis-tagged turn isn't silently zeroed. */
+export function scanOpenCodeSession(filePath: string, ctx: ScanContext): void {
+  if (fileTooLarge(filePath)) return;
+  let content: string;
+  try { content = readFileSync(filePath, "utf-8"); }
+  catch { return; }
+
+  let turns: any[] = [];
+  try {
+    const parsed = JSON.parse(content);
+    if (Array.isArray(parsed)) turns = parsed;
+    else if (Array.isArray(parsed?.messages)) turns = parsed.messages;
+    else if (Array.isArray(parsed?.parts)) turns = parsed.parts;
+    else if (Array.isArray(parsed?.turns)) turns = parsed.turns;
+    else if (Array.isArray(parsed?.history)) turns = parsed.history;
+    else turns = [parsed];
+  } catch {
+    for (const raw of content.split("\n")) {
+      if (!raw) continue;
+      try { turns.push(JSON.parse(raw)); } catch { ctx.parseErrors++; }
+    }
+    if (turns.length === 0) return;
+  }
+
+  for (const turn of turns) {
+    ctx.totalLines++;
+    const isAssistant =
+      turn?.role === "assistant" ||
+      turn?.type === "assistant" ||
+      turn?.type === "message" ||      // some shapes carry type:"message" + role:"assistant"
+      turn?.type === "response";
+    if (!isAssistant && turn?.role !== "assistant") continue;
+    ctx.assistantLines++;
+
+    const usage =
+      turn.usage ??
+      turn.message?.usage ??
+      turn.response?.usage ??
+      turn.tokens ??
+      null;
+    if (!usage) continue;
+    ctx.withUsage++;
+
+    // Model / provider can live at the turn, in a nested message/response,
+    // or as a `providerID` / `modelID` pair (OpenCode's documented config
+    // keys). Probe each location in order.
+    const rawModel: string | undefined =
+      turn.model ??
+      turn.message?.model ??
+      turn.response?.model ??
+      turn.modelID;
+    const rawProvider: string | undefined =
+      turn.provider ??
+      turn.providerID ??
+      turn.message?.provider ??
+      turn.response?.provider;
+    const { key: model, matched, provider } = normalizeOpenCodeModel(rawModel, rawProvider);
+    if (!matched && typeof rawModel === "string" && rawModel) ctx.unknownOpenCodeModels.add(rawModel);
+
+    const ts: string | undefined =
+      turn.timestamp ??
+      turn.created_at ??
+      (typeof turn.time?.created === "number" ? new Date(turn.time.created).toISOString() : undefined) ??
+      (typeof turn.created === "number" ? new Date(turn.created * 1000).toISOString() : undefined);
+    if (ts && (!ctx.minTs || ts < ctx.minTs)) ctx.minTs = ts;
+    if (ts && (!ctx.maxTs || ts > ctx.maxTs)) ctx.maxTs = ts;
+
+    const addInto = (t: ModelTotals) => {
+      if (provider === "anthropic") {
+        t.inputTokens        += usage.input_tokens ?? 0;
+        t.outputTokens       += usage.output_tokens ?? 0;
+        t.cacheReadTokens    += usage.cache_read_input_tokens ?? 0;
+        t.cacheCreationTokens += usage.cache_creation_input_tokens ?? 0;
+      } else if (provider === "openai") {
+        const totalInput = usage.input_tokens ?? usage.prompt_tokens ?? 0;
+        const cached = usage.input_tokens_details?.cached_tokens ?? usage.cached_tokens ?? 0;
+        t.inputTokens     += Math.max(0, totalInput - cached);
+        t.cacheReadTokens += cached;
+        t.outputTokens    += usage.output_tokens ?? usage.completion_tokens ?? 0;
+      } else if (provider === "google") {
+        t.inputTokens     += usage.input ?? usage.input_tokens ?? usage.prompt_tokens ?? 0;
+        t.outputTokens    += usage.output ?? usage.output_tokens ?? usage.completion_tokens ?? 0;
+        t.cacheReadTokens += usage.cached ?? usage.cached_tokens ?? 0;
+      } else if (provider === "mistral") {
+        t.inputTokens     += usage.prompt_tokens ?? usage.input_tokens ?? usage.input ?? 0;
+        t.outputTokens    += usage.completion_tokens ?? usage.output_tokens ?? usage.output ?? 0;
+        t.cacheReadTokens += usage.cached_tokens ?? usage.cache_read_input_tokens ?? usage.cached ?? 0;
+      } else {
+        // Unknown provider — permissive union so a new provider OpenCode
+        // adds upstream doesn't silently zero usage until we ship a mapping.
+        t.inputTokens        += usage.input_tokens ?? usage.prompt_tokens ?? usage.input ?? 0;
+        t.outputTokens       += usage.output_tokens ?? usage.completion_tokens ?? usage.output ?? 0;
+        t.cacheReadTokens    += usage.cache_read_input_tokens ?? usage.cached_tokens ?? usage.cached ?? 0;
+        t.cacheCreationTokens += usage.cache_creation_input_tokens ?? 0;
+      }
       t.messageCount++;
     };
 
@@ -1563,44 +1813,50 @@ function main(): number {
   }
 
   // --demo overrides all scan roots with bundled fixtures. The Gemini /
-  // Vibe / Codex overrides point at directories that may or may not exist —
-  // if they don't, the corresponding scan is skipped silently, so --demo
-  // never bleeds into real ~/.gemini, ~/.vibe, or ~/.codex data.
+  // Vibe / Codex / OpenCode overrides point at directories that may or may
+  // not exist — if they don't, the corresponding scan is skipped silently,
+  // so --demo never bleeds into real ~/.gemini, ~/.vibe, ~/.codex, or
+  // ~/.local/share/opencode data.
   if (args.demo) {
     args.path = join(scriptDir(), "examples");
     args.geminiPath = join(scriptDir(), "examples-gemini");
     args.vibePath = join(scriptDir(), "examples-vibe");
     args.codexPath = join(scriptDir(), "examples-codex");
+    args.opencodePath = join(scriptDir(), "examples-opencode");
   }
 
   // Abort only when NONE of the provider roots exist — each provider is
   // opt-in, so a machine with only one of them installed should still work.
-  const claudeExists = existsSync(args.path);
-  const geminiExists = existsSync(args.geminiPath);
-  const vibeExists   = existsSync(args.vibePath);
-  const codexExists  = existsSync(args.codexPath);
-  if (!claudeExists && !geminiExists && !vibeExists && !codexExists) {
+  const claudeExists   = existsSync(args.path);
+  const geminiExists   = existsSync(args.geminiPath);
+  const vibeExists     = existsSync(args.vibePath);
+  const codexExists    = existsSync(args.codexPath);
+  const opencodeExists = existsSync(args.opencodePath);
+  if (!claudeExists && !geminiExists && !vibeExists && !codexExists && !opencodeExists) {
     process.stderr.write(`subfit-ai: no provider path exists\n`);
-    process.stderr.write(`  --path         ${args.path}\n`);
-    process.stderr.write(`  --gemini-path  ${args.geminiPath}\n`);
-    process.stderr.write(`  --vibe-path    ${args.vibePath}\n`);
-    process.stderr.write(`  --codex-path   ${args.codexPath}\n`);
-    process.stderr.write(`  (use --path / --gemini-path / --vibe-path / --codex-path to point somewhere else, or --help)\n`);
+    process.stderr.write(`  --path           ${args.path}\n`);
+    process.stderr.write(`  --gemini-path    ${args.geminiPath}\n`);
+    process.stderr.write(`  --vibe-path      ${args.vibePath}\n`);
+    process.stderr.write(`  --codex-path     ${args.codexPath}\n`);
+    process.stderr.write(`  --opencode-path  ${args.opencodePath}\n`);
+    process.stderr.write(`  (use --path / --gemini-path / --vibe-path / --codex-path / --opencode-path to point somewhere else, or --help)\n`);
     return 1;
   }
 
   const { config, source: configSource } = loadConfig(args.config ?? undefined);
   const { pricing, planLimits } = config;
 
-  const files = claudeExists ? findJsonlFiles(args.path) : [];
-  const geminiFiles = geminiExists ? findGeminiSessions(args.geminiPath) : [];
-  const vibeFiles   = vibeExists   ? findVibeSessions(args.vibePath)     : [];
-  const codexFiles  = codexExists  ? findCodexSessions(args.codexPath)   : [];
+  const files         = claudeExists   ? findJsonlFiles(args.path)             : [];
+  const geminiFiles   = geminiExists   ? findGeminiSessions(args.geminiPath)   : [];
+  const vibeFiles     = vibeExists     ? findVibeSessions(args.vibePath)       : [];
+  const codexFiles    = codexExists    ? findCodexSessions(args.codexPath)     : [];
+  const opencodeFiles = opencodeExists ? findOpenCodeSessions(args.opencodePath) : [];
 
-  const ctxClaude = emptyScanContext();
-  const ctxGemini = emptyScanContext();
-  const ctxVibe   = emptyScanContext();
-  const ctxCodex  = emptyScanContext();
+  const ctxClaude   = emptyScanContext();
+  const ctxGemini   = emptyScanContext();
+  const ctxVibe     = emptyScanContext();
+  const ctxCodex    = emptyScanContext();
+  const ctxOpenCode = emptyScanContext();
 
   // Progress logs → stderr only so --json output on stdout stays clean.
   // On a TTY we use CR + `\x1b[K` (clear-to-end-of-line) so each update
@@ -1650,20 +1906,32 @@ function main(): number {
       `(${ctxCodex.assistantLines.toLocaleString()} assistant messages)`,
     );
   }
+  if (opencodeExists) {
+    progress(`⏳ Scanning OpenCode sessions under ${args.opencodePath} ...`);
+    for (const f of opencodeFiles) scanOpenCodeSession(f, ctxOpenCode);
+    progress(
+      `✓ OpenCode: ${opencodeFiles.length.toLocaleString()} session(s) scanned ` +
+      `(${ctxOpenCode.assistantLines.toLocaleString()} assistant messages)`,
+    );
+  }
   progress(`⏳ Computing costs ...`);
   const ctx = mergeContexts(
-    mergeContexts(mergeContexts(ctxClaude, ctxGemini), ctxVibe),
-    ctxCodex,
+    mergeContexts(
+      mergeContexts(mergeContexts(ctxClaude, ctxGemini), ctxVibe),
+      ctxCodex,
+    ),
+    ctxOpenCode,
   );
   progress(`✓ Done.`);
   // Leave stderr on a clean line so stdout (summary table) starts fresh.
   progressClear();
 
   const providerStats: ProviderStats[] = [
-    providerStatsOf("Claude", files.length,       ctxClaude),
-    providerStatsOf("Gemini", geminiFiles.length, ctxGemini),
-    providerStatsOf("Vibe",   vibeFiles.length,   ctxVibe),
-    providerStatsOf("Codex",  codexFiles.length,  ctxCodex),
+    providerStatsOf("Claude",   files.length,         ctxClaude),
+    providerStatsOf("Gemini",   geminiFiles.length,   ctxGemini),
+    providerStatsOf("Vibe",     vibeFiles.length,     ctxVibe),
+    providerStatsOf("Codex",    codexFiles.length,    ctxCodex),
+    providerStatsOf("OpenCode", opencodeFiles.length, ctxOpenCode),
   ];
 
   // Unknown-model warnings are collected here and emitted at the END of
@@ -1692,6 +1960,11 @@ function main(): number {
       process.stderr.write(`subfit-ai: unrecognized Codex model id(s) bucketed as codex-standard: ${list}\n`);
       process.stderr.write(`  (update normalizeCodexModel() or config.pricing to add a proper bucket)\n`);
     }
+    if (ctx.unknownOpenCodeModels.size > 0) {
+      const list = [...ctx.unknownOpenCodeModels].map(sanitizeForTerminal).sort().join(", ");
+      process.stderr.write(`subfit-ai: unrecognized OpenCode model id(s) (provider could not be inferred): ${list}\n`);
+      process.stderr.write(`  (update normalizeOpenCodeModel() to route this model to a provider family)\n`);
+    }
   };
 
   const rows = computeRows(ctx.byModel, pricing);
@@ -1699,7 +1972,7 @@ function main(): number {
     ctx.withUsage,        // 5h verdict is about messages that actually spent tokens;
     ctx.minTs,            // bare assistantLines over-counts tool-only / empty turns.
     ctx.maxTs,
-    files.length + geminiFiles.length + vibeFiles.length + codexFiles.length,  // 1 file ≈ 1 session per provider
+    files.length + geminiFiles.length + vibeFiles.length + codexFiles.length + opencodeFiles.length,  // 1 file ≈ 1 session per provider
     ctx.byMonth.size,                   // distinct YYYY-MM buckets with data
   );
   // M2 — subscription verdicts also surfaced in JSON output.
@@ -1736,11 +2009,13 @@ function main(): number {
       geminiPath: args.geminiPath,
       vibePath: args.vibePath,
       codexPath: args.codexPath,
+      opencodePath: args.opencodePath,
       configSource,
       filesScanned: files.length,
       geminiSessionsScanned: geminiFiles.length,
       vibeSessionsScanned: vibeFiles.length,
       codexSessionsScanned: codexFiles.length,
+      opencodeSessionsScanned: opencodeFiles.length,
       dateRange: { first: ctx.minTs, last: ctx.maxTs },
       stats: {
         totalLines: ctx.totalLines,
@@ -1748,10 +2023,11 @@ function main(): number {
         withUsage: ctx.withUsage,
         parseErrors: ctx.parseErrors,
       },
-      unknownClaudeModels: [...ctx.unknownClaudeModels].sort(),
-      unknownGeminiModels: [...ctx.unknownGeminiModels].sort(),
-      unknownVibeModels:   [...ctx.unknownVibeModels].sort(),
-      unknownCodexModels:  [...ctx.unknownCodexModels].sort(),
+      unknownClaudeModels:   [...ctx.unknownClaudeModels].sort(),
+      unknownGeminiModels:   [...ctx.unknownGeminiModels].sort(),
+      unknownVibeModels:     [...ctx.unknownVibeModels].sort(),
+      unknownCodexModels:    [...ctx.unknownCodexModels].sort(),
+      unknownOpenCodeModels: [...ctx.unknownOpenCodeModels].sort(),
       providerStats,
       pricing,
       planLimits,

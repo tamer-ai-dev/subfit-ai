@@ -83,6 +83,7 @@ describe("scanCodexSession", () => {
     unknownGeminiModels: new Set(),
     unknownVibeModels: new Set(),
     unknownCodexModels: new Set(),
+    unknownOpenCodeModels: new Set(),
   });
 
   let tmpFile: string;
