@@ -1580,45 +1580,61 @@ function main(): number {
   const ctxCodex  = emptyScanContext();
 
   // Progress logs → stderr only so --json output on stdout stays clean.
+  // On a TTY we use CR + `\x1b[K` (clear-to-end-of-line) so each update
+  // overwrites the previous one, collapsing the N progress lines into a
+  // single live row that the final summary table then takes over from.
+  // When stderr is piped / redirected (CI logs, file captures), we fall
+  // back to the old stacked newline-terminated format so nothing is lost.
+  const stderrIsTTY = process.stderr.isTTY === true;
+  const progress = (msg: string) => {
+    if (stderrIsTTY) process.stderr.write(`\r\x1b[K${msg}`);
+    else process.stderr.write(msg + "\n");
+  };
+  const progressClear = () => {
+    if (stderrIsTTY) process.stderr.write(`\r\x1b[K`);
+  };
+
   if (claudeExists) {
-    process.stderr.write(`⏳ Scanning Claude sessions under ${args.path} ...\n`);
+    progress(`⏳ Scanning Claude sessions under ${args.path} ...`);
     for (const f of files) scanJsonl(f, ctxClaude);
-    process.stderr.write(
+    progress(
       `✓ Claude: ${files.length.toLocaleString()} file(s) scanned ` +
       `(${ctxClaude.totalLines.toLocaleString()} lines, ` +
-      `${ctxClaude.assistantLines.toLocaleString()} assistant messages)\n`,
+      `${ctxClaude.assistantLines.toLocaleString()} assistant messages)`,
     );
   }
   if (geminiExists) {
-    process.stderr.write(`⏳ Scanning Gemini sessions under ${args.geminiPath} ...\n`);
+    progress(`⏳ Scanning Gemini sessions under ${args.geminiPath} ...`);
     for (const f of geminiFiles) scanGeminiSession(f, ctxGemini);
-    process.stderr.write(
+    progress(
       `✓ Gemini: ${geminiFiles.length.toLocaleString()} session(s) scanned ` +
-      `(${ctxGemini.assistantLines.toLocaleString()} assistant messages)\n`,
+      `(${ctxGemini.assistantLines.toLocaleString()} assistant messages)`,
     );
   }
   if (vibeExists) {
-    process.stderr.write(`⏳ Scanning Vibe sessions under ${args.vibePath} ...\n`);
+    progress(`⏳ Scanning Vibe sessions under ${args.vibePath} ...`);
     for (const f of vibeFiles) scanVibeSession(f, ctxVibe);
-    process.stderr.write(
+    progress(
       `✓ Vibe: ${vibeFiles.length.toLocaleString()} session(s) scanned ` +
-      `(${ctxVibe.assistantLines.toLocaleString()} assistant messages)\n`,
+      `(${ctxVibe.assistantLines.toLocaleString()} assistant messages)`,
     );
   }
   if (codexExists) {
-    process.stderr.write(`⏳ Scanning Codex sessions under ${args.codexPath} ...\n`);
+    progress(`⏳ Scanning Codex sessions under ${args.codexPath} ...`);
     for (const f of codexFiles) scanCodexSession(f, ctxCodex);
-    process.stderr.write(
+    progress(
       `✓ Codex: ${codexFiles.length.toLocaleString()} session(s) scanned ` +
-      `(${ctxCodex.assistantLines.toLocaleString()} assistant messages)\n`,
+      `(${ctxCodex.assistantLines.toLocaleString()} assistant messages)`,
     );
   }
-  process.stderr.write(`⏳ Computing costs ...\n`);
+  progress(`⏳ Computing costs ...`);
   const ctx = mergeContexts(
     mergeContexts(mergeContexts(ctxClaude, ctxGemini), ctxVibe),
     ctxCodex,
   );
-  process.stderr.write(`✓ Done.\n`);
+  progress(`✓ Done.`);
+  // Leave stderr on a clean line so stdout (summary table) starts fresh.
+  progressClear();
 
   const providerStats: ProviderStats[] = [
     providerStatsOf("Claude", files.length,       ctxClaude, "lines"),
