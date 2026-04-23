@@ -6,7 +6,10 @@
     "claude-sonnet-4":  { "label": "Claude Sonnet 4",  "input": 3.0,  "output": 15.0, "cacheRead": 0.30,  "cacheWrite": 3.75,  "_source": "https://docs.anthropic.com/en/docs/about-claude/pricing" },
     "claude-haiku-4-5": { "label": "Claude Haiku 4.5", "input": 1.0,  "output": 5.0,  "cacheRead": 0.10,  "cacheWrite": 1.25,  "_source": "https://docs.anthropic.com/en/docs/about-claude/pricing" },
     "codex-standard":   { "label": "OpenAI Codex (gpt-5.3-codex) standard", "input": 1.75, "cacheRead": 0.175, "cacheWrite": 0, "output": 14.0 },
-    "codex-priority":   { "label": "OpenAI Codex (gpt-5.3-codex) priority", "input": 3.50, "cacheWrite": 0, "output": 28.0 }
+    "codex-priority":   { "label": "OpenAI Codex (gpt-5.3-codex) priority", "input": 3.50, "cacheWrite": 0, "output": 28.0 },
+    "gemini-pro":        { "label": "Gemini 2.5 Pro",        "input": 1.00, "output": 10.00, "cacheRead": 0.10, "cacheWrite": 0, "_source": "https://ai.google.dev/gemini-api/docs/pricing" },
+    "gemini-flash":      { "label": "Gemini 2.5 Flash",      "input": 0.30, "output": 2.50,  "cacheRead": 0.03, "cacheWrite": 0, "_source": "https://ai.google.dev/gemini-api/docs/pricing" },
+    "gemini-flash-lite": { "label": "Gemini 2.5 Flash-Lite", "input": 0.10, "output": 0.40,  "cacheRead": 0.01, "cacheWrite": 0, "_source": "https://ai.google.dev/gemini-api/docs/pricing" }
   },
   "planLimits": {
     "claude-pro":        { "label": "Claude Pro",        "monthlyUsd": 20,   "messagesPer5h": [10, 45],    "sessionsCap": null, "note": "40-45 observed, shared across claude.ai + Code + Desktop" },
