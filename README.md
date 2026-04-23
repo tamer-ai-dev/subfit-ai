@@ -123,7 +123,7 @@ Sessions: 847 total over 2 month(s) (avg 423.5/mo). Max plans cap at 50 sessions
   depleting faster than expected since March 2026 (GitHub docs #37, #38).
   If your avg is within 20% of a plan limit, expect occasional throttling.
 
-→ Best fit: OpenAI Pro 20x at $200/mo — fits below baseline
+→ Best fit: OpenAI Pro at $100/mo — fits within high-usage band
 
 ── Per model ──
 Model             Msgs   In    Out    CacheR  CacheW   Claude $    Codex-Std $  Codex-Pri $  Savings
@@ -147,7 +147,7 @@ evidence. Under the comparison table:
   the months they span, and the resulting `avg N/mo`. If the average
   exceeds 50, Claude Max plans will hit the session cap even when their
   5h verdict says FITS — this is why the example above recommends OpenAI
-  Pro 20x rather than Claude Max 20x.
+  Pro (which has no session cap) rather than Claude Max 20x.
 - **Volatility warning**: Claude limits are documented baselines, not
   guarantees.
 - **Best fit**: the cheapest plan whose 5h verdict is FITS **and** whose
