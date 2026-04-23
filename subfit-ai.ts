@@ -263,6 +263,16 @@ function emptyTotals(): ModelTotals {
  *  process. Oversized files are skipped with a stderr warning. */
 const MAX_FILE_BYTES = 50 * 1024 * 1024;
 
+/** Strip ASCII and C1 control characters from a string before emitting it to
+ *  a TTY. Untrusted wire-model IDs could otherwise carry escape sequences
+ *  (cursor moves, colour codes, terminal-title rewrites) that execute when
+ *  printed. Newline (0x0A) is preserved so multi-line contexts still work.
+ *  Everything < 0x20 (except 0x0A) plus the C1 block (0x7F-0x9F) is stripped. */
+export function sanitizeForTerminal(s: string): string {
+  // eslint-disable-next-line no-control-regex
+  return s.replace(/[\x00-\x09\x0B-\x1F\x7F-\x9F]/g, "");
+}
+
 function fileTooLarge(filePath: string): boolean {
   let size: number;
   try { size = statSync(filePath).size; } catch { return false; }
@@ -1250,13 +1260,15 @@ function main(): number {
 
   // M1 — warn when model strings didn't match any known bucket. Per-provider
   // so the default bucket named in the warning (Opus / Pro) is accurate.
+  // Raw wire names come from untrusted JSONL/JSON content and must be
+  // sanitized before writing to a TTY to avoid escape-sequence injection.
   if (ctx.unknownClaudeModels.size > 0) {
-    const list = [...ctx.unknownClaudeModels].sort().join(", ");
+    const list = [...ctx.unknownClaudeModels].map(sanitizeForTerminal).sort().join(", ");
     process.stderr.write(`subfit-ai: unrecognized Claude model id(s) bucketed as Claude Opus: ${list}\n`);
     process.stderr.write(`  (update normalizeModel() or config.pricing to add a proper bucket)\n`);
   }
   if (ctx.unknownGeminiModels.size > 0) {
-    const list = [...ctx.unknownGeminiModels].sort().join(", ");
+    const list = [...ctx.unknownGeminiModels].map(sanitizeForTerminal).sort().join(", ");
     process.stderr.write(`subfit-ai: unrecognized Gemini model id(s) bucketed as Gemini Pro: ${list}\n`);
     process.stderr.write(`  (update normalizeGeminiModel() or config.pricing to add a proper bucket)\n`);
   }

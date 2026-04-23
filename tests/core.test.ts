@@ -5,6 +5,7 @@ import {
   findBestFit,
   costOn,
   computeSubscriptionStats,
+  sanitizeForTerminal,
 } from "../subfit-ai.ts";
 
 describe("normalizeModel", () => {
@@ -134,6 +135,27 @@ describe("findBestFit", () => {
     const rec = findBestFit(stats(100), only);
     expect(rec.primary).toBeNull();
     expect(rec.marginal).toBeNull();
+  });
+});
+
+describe("sanitizeForTerminal", () => {
+  it("strips ANSI escape sequences from untrusted input", () => {
+    // A real-world attack vector: a wire-name containing ESC[2J (clear screen).
+    const hostile = "claude\x1b[2J-pwn";
+    expect(sanitizeForTerminal(hostile)).toBe("claude[2J-pwn");
+  });
+
+  it("strips C1 control characters (0x7F-0x9F)", () => {
+    expect(sanitizeForTerminal("abc\x7fdef\x9fghi")).toBe("abcdefghi");
+  });
+
+  it("preserves newline (0x0A) but drops other low-range controls", () => {
+    expect(sanitizeForTerminal("a\nb\tc\x00d")).toBe("a\nbcd");
+  });
+
+  it("is a no-op on clean ASCII and Unicode", () => {
+    expect(sanitizeForTerminal("claude-opus-4-7")).toBe("claude-opus-4-7");
+    expect(sanitizeForTerminal("gémini-pro")).toBe("gémini-pro");
   });
 });
 
