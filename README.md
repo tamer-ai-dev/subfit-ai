@@ -8,22 +8,34 @@
 
 ## What it does
 
-`subfit-ai` scans your local Claude Code session history, prices the same
-token volume on OpenAI Codex, and checks which subscription tier — Claude
-Pro / Max 5x / Max 20x / Team / Enterprise, or OpenAI Plus / Pro / Pro 20x —
-your real 5-hour usage actually fits into. It runs entirely offline against
-the JSONL files Claude Code already writes to disk.
+`subfit-ai` scans your local Claude Code **and Gemini CLI** session
+history, prices the same token volume on OpenAI Codex, and checks which
+subscription tier — Claude Pro / Max 5x / Max 20x / Team / Enterprise, or
+OpenAI Plus / Pro / Pro 20x — your real 5-hour usage actually fits into.
+It runs entirely offline against the JSONL (Claude) and JSON (Gemini)
+session files the two CLIs already write to disk.
 
 ## How it works
 
-**Data source: local JSONL files only.** Claude Code appends one JSON event
-per line to `~/.claude/projects/<cwd-slug>/<sessionId>.jsonl` as you chat —
-one file per session, kept on your machine. `subfit-ai` reads those files
-directly; no Anthropic API export, no network call, no third-party
-aggregator. If `claude` has run on this machine, the data is already on
-disk and `subfit-ai` can price it.
+**Data source: local session files only.** Two sources are scanned in
+parallel and merged into a single report:
 
-Every assistant turn carries token counts under `message.usage`:
+- **Claude Code** appends one JSON event per line to
+  `~/.claude/projects/<cwd-slug>/<sessionId>.jsonl` (one file per
+  session, JSONL format).
+- **Gemini CLI** writes one JSON object per session to
+  `~/.gemini/tmp/<slug>/chats/session-*.json` (full JSON, one file per
+  session). See `docs/studies/STUDY-gemini-tokens.md` for the format
+  details.
+
+`subfit-ai` reads those files directly — no Anthropic/Google API export,
+no network call, no third-party aggregator. If either CLI has run on
+this machine, the data is already on disk and `subfit-ai` can price it.
+If a provider's root directory does not exist, that side is skipped
+silently; there is no "only Claude" or "only Gemini" mode switch.
+
+On the **Claude** side, every assistant turn carries token counts under
+`message.usage`:
 
 ```json
 {
@@ -38,6 +50,19 @@ Every assistant turn carries token counts under `message.usage`:
       "cache_creation_input_tokens": 57591
     }
   }
+}
+```
+
+On the **Gemini** side, each `messages[]` entry with `type: "gemini"`
+carries its counts under `tokens` (with `cached` as the cache-read
+equivalent; Gemini has no cache-write tier):
+
+```json
+{
+  "type": "gemini",
+  "timestamp": "2026-04-23T06:57:24.342Z",
+  "model": "gemini-3-flash-preview",
+  "tokens": { "input": 7249, "output": 83, "cached": 5722, "total": 7585 }
 }
 ```
 
@@ -69,10 +94,11 @@ YYYY-MM, and computes:
 Run with `npx tsx` (no install needed — requires Node 18+):
 
 ```bash
-npx tsx ./subfit-ai.ts                    # scan ~/.claude with defaults
-npx tsx ./subfit-ai.ts --demo             # use bundled examples/sample.jsonl
-npx tsx ./subfit-ai.ts --path /custom     # scan another directory
-npx tsx ./subfit-ai.ts --config my.json   # custom pricing / plan file
+npx tsx ./subfit-ai.ts                       # scan ~/.claude AND ~/.gemini
+npx tsx ./subfit-ai.ts --demo                # use bundled examples/sample.jsonl
+npx tsx ./subfit-ai.ts --path /custom        # override the Claude scan root
+npx tsx ./subfit-ai.ts --gemini-path /other  # override the Gemini scan root
+npx tsx ./subfit-ai.ts --config my.json      # custom pricing / plan file
 npx tsx ./subfit-ai.ts --json             # machine-readable output
 npx tsx ./subfit-ai.ts --no-monthly       # skip the per-month table
 npx tsx ./subfit-ai.ts --export           # write ./subfit-report.md (GFM)
@@ -99,7 +125,8 @@ on Windows — npm generates a `.cmd` wrapper that calls `tsx` directly.
 
 | Flag | Default | Description |
 | --- | --- | --- |
-| `--path <dir>` | `~/.claude` | Root directory to scan recursively for `*.jsonl` |
+| `--path <dir>` | `~/.claude` | Claude Code scan root — recursively globs `*.jsonl` |
+| `--gemini-path <dir>` | `~/.gemini` | Gemini CLI scan root — globs `tmp/<slug>/chats/session-*.json`; skipped silently if missing |
 | `--config <file>` | `./config.json` | Pricing + plan-limits config; falls back to the embedded `default-config.json` if missing or malformed |
 | `--json` | off | Emit a single JSON object instead of terminal tables |
 | `--no-monthly` | off | Skip the YYYY-MM breakdown |
