@@ -388,6 +388,8 @@ interface ScanContext {
   unknownClaudeModels: Set<string>;
   /** Gemini wire names (from session-JSON scanner) that didn't match pro/flash/flash-lite. */
   unknownGeminiModels: Set<string>;
+  /** Vibe wire names (from Mistral Vibe scanner) that didn't match devstral*. */
+  unknownVibeModels: Set<string>;
 }
 
 function emptyScanContext(): ScanContext {
@@ -398,6 +400,7 @@ function emptyScanContext(): ScanContext {
     totalLines: 0, assistantLines: 0, withUsage: 0, parseErrors: 0,
     unknownClaudeModels: new Set(),
     unknownGeminiModels: new Set(),
+    unknownVibeModels: new Set(),
   };
 }
 
@@ -426,6 +429,7 @@ function mergeContexts(a: ScanContext, b: ScanContext): ScanContext {
   for (const src of [a, b]) {
     for (const m of src.unknownClaudeModels) out.unknownClaudeModels.add(m);
     for (const m of src.unknownGeminiModels) out.unknownGeminiModels.add(m);
+    for (const m of src.unknownVibeModels) out.unknownVibeModels.add(m);
     for (const [model, t] of src.byModel) {
       const cur = out.byModel.get(model);
       if (!cur) out.byModel.set(model, { ...t });
@@ -608,6 +612,143 @@ export function scanGeminiSession(filePath: string, ctx: ScanContext): void {
       t.outputTokens += tokens.output ?? 0;
       t.cacheReadTokens += tokens.cached ?? 0;
       // Gemini has no cache-write equivalent; leave cacheCreationTokens alone.
+      t.messageCount++;
+    };
+
+    let mt = ctx.byModel.get(model);
+    if (!mt) { mt = emptyTotals(); ctx.byModel.set(model, mt); }
+    addInto(mt);
+
+    const ym = yearMonth(ts);
+    if (ym) {
+      let monthBucket = ctx.byMonth.get(ym);
+      if (!monthBucket) { monthBucket = new Map(); ctx.byMonth.set(ym, monthBucket); }
+      let mmt = monthBucket.get(model);
+      if (!mmt) { mmt = emptyTotals(); monthBucket.set(model, mmt); }
+      addInto(mmt);
+    }
+  }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Mistral Vibe CLI session scanner. Format is [UNVERIFIED] at time of
+// writing — Vibe was not installed on the authoring machine. See
+// docs/studies/STUDY-vibe-tokens.md for the research that shaped this
+// adapter. The scanner is permissive by design: it accepts both a full
+// JSON object (with a messages/turns/history array) AND line-by-line
+// JSONL, and probes multiple common assistant-turn shapes. The source
+// of truth remains the open-source Vibe repo
+// (https://github.com/mistralai/mistral-vibe); a contributor with a real
+// install should tighten the parsing once the format is pinned.
+// ───────────────────────────────────────────────────────────────────────────
+
+/** Walk Vibe root, return every `.json` / `.jsonl` file under `logs/`
+ *  (recursively, capped at MAX_SCAN_DEPTH). Returns [] when root or
+ *  root/logs is missing so the caller skips Vibe silently. */
+export function findVibeSessions(root: string): string[] {
+  const files: string[] = [];
+  if (!existsSync(root)) return files;
+  const logsDir = join(root, "logs");
+  if (!existsSync(logsDir)) return files;
+
+  const seen = new Set<string>();
+  const stack: Array<[string, number]> = [[logsDir, 0]];
+  while (stack.length > 0) {
+    const [dir, depth] = stack.pop()!;
+    if (seen.has(dir)) continue;
+    seen.add(dir);
+    if (depth > MAX_SCAN_DEPTH) continue;
+    let entries: string[];
+    try { entries = readdirSync(dir); } catch { continue; }
+    for (const name of entries) {
+      const p = join(dir, name);
+      let sub;
+      try { sub = statSync(p); } catch { continue; }
+      if (sub.isDirectory()) stack.push([p, depth + 1]);
+      else if (sub.isFile() && (name.endsWith(".json") || name.endsWith(".jsonl"))) files.push(p);
+    }
+  }
+  return files;
+}
+
+/** Vibe wire id → PRICING key. "small" must be checked before the generic
+ *  "devstral" fallback since "devstral-small-2" also contains "devstral".
+ *  Unknown strings fall back to `devstral-2` with `matched: false` so
+ *  main() can warn once per run. */
+export function normalizeVibeModel(m: string | undefined): { key: string; matched: boolean } {
+  if (!m) return { key: "devstral-2", matched: false };
+  const low = m.toLowerCase();
+  if (low.includes("small")) return { key: "devstral-small-2", matched: true };
+  if (low.includes("devstral")) return { key: "devstral-2", matched: true };
+  return { key: "devstral-2", matched: false };
+}
+
+/** Parse one Vibe session file and fold its assistant turns into the shared
+ *  ScanContext. The file may be a full JSON object (with a
+ *  `messages`/`turns`/`history` array), a single JSON turn, or JSONL — we
+ *  try JSON first and fall back to line-by-line on parse failure.
+ *
+ *  For each candidate turn, we accept the most common assistant-role shapes:
+ *    { role: "assistant", usage: {...} }
+ *    { type: "assistant", usage: {...} }     (Claude-style)
+ *    { type: "vibe", usage: {...} }          (mirrors Gemini's type: "gemini")
+ *    { role: "assistant", message: { usage: {...} } }
+ *  Token mapping follows the Mistral Chat Completions API shape
+ *  (prompt_tokens / completion_tokens) with Claude / Gemini fallbacks for
+ *  forgiveness. Devstral has no documented cache-write tier. */
+export function scanVibeSession(filePath: string, ctx: ScanContext): void {
+  if (fileTooLarge(filePath)) return;
+  let content: string;
+  try { content = readFileSync(filePath, "utf-8"); }
+  catch { return; }
+
+  ctx.totalLines++; // count each session file as one "line" for header stats
+
+  // Try full-file JSON first; fall back to JSONL if that fails.
+  let turns: any[] = [];
+  try {
+    const parsed = JSON.parse(content);
+    if (Array.isArray(parsed)) turns = parsed;
+    else if (Array.isArray(parsed?.messages)) turns = parsed.messages;
+    else if (Array.isArray(parsed?.turns)) turns = parsed.turns;
+    else if (Array.isArray(parsed?.history)) turns = parsed.history;
+    else turns = [parsed];
+  } catch {
+    for (const raw of content.split("\n")) {
+      if (!raw) continue;
+      try { turns.push(JSON.parse(raw)); } catch { ctx.parseErrors++; }
+    }
+    if (turns.length === 0) return;
+  }
+
+  for (const turn of turns) {
+    const isAssistant =
+      turn?.role === "assistant" ||
+      turn?.type === "assistant" ||
+      turn?.type === "vibe";
+    if (!isAssistant) continue;
+    ctx.assistantLines++;
+
+    const usage = turn.usage ?? turn.message?.usage ?? turn.tokens;
+    if (!usage) continue;
+    ctx.withUsage++;
+
+    const rawModel = turn.model ?? turn.message?.model;
+    const { key: model, matched } = normalizeVibeModel(rawModel);
+    if (!matched && typeof rawModel === "string" && rawModel) ctx.unknownVibeModels.add(rawModel);
+
+    const ts: string | undefined = turn.timestamp ?? turn.created_at ?? turn.ts;
+    if (ts && (!ctx.minTs || ts < ctx.minTs)) ctx.minTs = ts;
+    if (ts && (!ctx.maxTs || ts > ctx.maxTs)) ctx.maxTs = ts;
+
+    const addInto = (t: ModelTotals) => {
+      // Mistral API shape: prompt_tokens / completion_tokens. Claude and
+      // Gemini shapes fall through as fallbacks so a Vibe build that
+      // ever emits those doesn't silently zero the cost.
+      t.inputTokens     += usage.prompt_tokens ?? usage.input_tokens ?? usage.input ?? 0;
+      t.outputTokens    += usage.completion_tokens ?? usage.output_tokens ?? usage.output ?? 0;
+      t.cacheReadTokens += usage.cached_tokens ?? usage.cache_read_input_tokens ?? usage.cached ?? 0;
+      // No cache-write tier documented for Devstral.
       t.messageCount++;
     };
 

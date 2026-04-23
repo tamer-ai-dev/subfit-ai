@@ -73,6 +73,7 @@ describe("scanGeminiSession", () => {
     totalLines: 0, assistantLines: 0, withUsage: 0, parseErrors: 0,
     unknownClaudeModels: new Set(),
     unknownGeminiModels: new Set(),
+    unknownVibeModels: new Set(),
   });
 
   let tmpFile: string;
