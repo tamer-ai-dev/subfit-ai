@@ -259,9 +259,20 @@ export function findJsonlFiles(root: string): string[] {
   return files;
 }
 
-/** message.model wire id → PRICING key. Loose matching so 4-7 etc still bucket correctly.
- *  Unknown strings fall back to opus. `matched` is false for the fallback path so the
- *  caller can warn once about bucketing assumptions. */
+/** message.model wire id → PRICING key. Loose matching: any wire name containing
+ *  "haiku" / "sonnet" / "opus" (case-insensitive) buckets into the corresponding
+ *  family key. Concrete wire names verified to map correctly:
+ *
+ *    claude-opus-4, claude-opus-4-5, claude-opus-4-7             → claude-opus-4
+ *    claude-sonnet-4, claude-sonnet-4-5, claude-sonnet-4-6       → claude-sonnet-4
+ *    claude-haiku-4-5, claude-haiku-4-5-20251001                 → claude-haiku-4-5
+ *
+ *  So point-release versions (4-6, 4-7, dated snapshots) are priced at the family
+ *  rate — no $0 gap when Anthropic ships a new Opus/Sonnet/Haiku revision. Update
+ *  this table if a pricing divergence is introduced between minor versions.
+ *
+ *  Unknown strings fall back to opus with `matched: false` so the caller warns
+ *  once per run instead of silently mispricing. */
 export function normalizeModel(m: string | undefined): { key: string; matched: boolean } {
   if (!m) return { key: "claude-opus-4", matched: false };
   const low = m.toLowerCase();
