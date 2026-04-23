@@ -1212,8 +1212,8 @@ function main(): number {
 
   const rows = computeRows(ctx.byModel, pricing);
   const subStats = computeSubscriptionStats(
-    ctx.assistantLines,
-    ctx.minTs,
+    ctx.withUsage,        // 5h verdict is about messages that actually spent tokens;
+    ctx.minTs,            // bare assistantLines over-counts tool-only / empty turns.
     ctx.maxTs,
     files.length + geminiFiles.length,  // session ≈ 1 Claude JSONL + 1 Gemini session file
     ctx.byMonth.size,                   // distinct YYYY-MM buckets with data
