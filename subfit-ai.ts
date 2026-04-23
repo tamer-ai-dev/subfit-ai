@@ -133,6 +133,9 @@ interface Args {
   demo: boolean;
   /** When true, main() prints the package version and exits. */
   version: boolean;
+  /** Allow --export to overwrite an existing target. Without this flag the
+   *  run aborts rather than silently clobber a report. */
+  force: boolean;
 }
 
 /** Read `version` from package.json sitting next to the script. Returns "unknown"
@@ -161,6 +164,7 @@ function parseArgs(argv: string[]): Args {
     unknownFlags: [],
     demo: false,
     version: false,
+    force: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -168,6 +172,7 @@ function parseArgs(argv: string[]): Args {
     else if (a === "--version" || a === "-v") args.version = true;
     else if (a === "--json") args.json = true;
     else if (a === "--demo") args.demo = true;
+    else if (a === "--force") args.force = true;
     else if (a === "--no-monthly") args.monthly = false;
     else if (a === "--path") args.path = argv[++i] ?? args.path;
     else if (a.startsWith("--path=")) args.path = a.slice("--path=".length);
@@ -210,8 +215,10 @@ OPTIONS
   --json          Emit machine-readable JSON instead of a terminal table.
   --no-monthly    Skip the monthly breakdown (per-model table only).
   --export [file] Write a Markdown (GFM) report. If no file is given, defaults
-                  to ./subfit-report.md. Overwrites existing files with a warning.
-                  Can be combined with normal terminal output.
+                  to ./subfit-report.md. REFUSES to overwrite an existing
+                  file unless --force is also passed. Can be combined with
+                  normal terminal output.
+  --force         Allow --export to overwrite an existing target file.
   --demo          Scan examples/sample.jsonl bundled with this script instead
                   of --path. Useful for trying the tool without Claude Code.
   -v, --version   Print the package version and exit.
@@ -1343,7 +1350,13 @@ function main(): number {
     // Allow --export alongside --json
     if (args.exportPath) {
       const target = args.exportPath;
-      if (existsSync(target)) process.stderr.write(`subfit-ai: overwriting existing file ${target}\n`);
+      if (existsSync(target)) {
+        if (!args.force) {
+          process.stderr.write(`subfit-ai: ${target} exists, use --force to overwrite\n`);
+          return 1;
+        }
+        process.stderr.write(`subfit-ai: overwriting existing file ${target}\n`);
+      }
       try {
         const md = renderMarkdown({
           rows, byMonth: ctx.byMonth, subStats,
@@ -1382,6 +1395,10 @@ function main(): number {
   if (args.exportPath) {
     const target = args.exportPath;
     if (existsSync(target)) {
+      if (!args.force) {
+        process.stderr.write(`subfit-ai: ${target} exists, use --force to overwrite\n`);
+        return 1;
+      }
       process.stderr.write(`subfit-ai: overwriting existing file ${target}\n`);
     }
     try {
