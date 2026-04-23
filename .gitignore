@@ -10,6 +10,7 @@ dist/
 # Dotfiles/dotdirs (agent scaffolds, local config)
 .*
 !.gitignore
+!.github/
 
 # Coverage
 coverage/
