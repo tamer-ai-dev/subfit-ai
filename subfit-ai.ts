@@ -399,6 +399,8 @@ interface ScanContext {
   unknownGeminiModels: Set<string>;
   /** Vibe wire names (from Mistral Vibe scanner) that didn't match devstral*. */
   unknownVibeModels: Set<string>;
+  /** Codex wire names (from OpenAI Codex scanner) that didn't match the codex / gpt-5 families. */
+  unknownCodexModels: Set<string>;
 }
 
 function emptyScanContext(): ScanContext {
@@ -410,6 +412,7 @@ function emptyScanContext(): ScanContext {
     unknownClaudeModels: new Set(),
     unknownGeminiModels: new Set(),
     unknownVibeModels: new Set(),
+    unknownCodexModels: new Set(),
   };
 }
 
@@ -438,7 +441,8 @@ function mergeContexts(a: ScanContext, b: ScanContext): ScanContext {
   for (const src of [a, b]) {
     for (const m of src.unknownClaudeModels) out.unknownClaudeModels.add(m);
     for (const m of src.unknownGeminiModels) out.unknownGeminiModels.add(m);
-    for (const m of src.unknownVibeModels) out.unknownVibeModels.add(m);
+    for (const m of src.unknownVibeModels)   out.unknownVibeModels.add(m);
+    for (const m of src.unknownCodexModels)  out.unknownCodexModels.add(m);
     for (const [model, t] of src.byModel) {
       const cur = out.byModel.get(model);
       if (!cur) out.byModel.set(model, { ...t });
@@ -758,6 +762,158 @@ export function scanVibeSession(filePath: string, ctx: ScanContext): void {
       t.outputTokens    += usage.completion_tokens ?? usage.output_tokens ?? usage.output ?? 0;
       t.cacheReadTokens += usage.cached_tokens ?? usage.cache_read_input_tokens ?? usage.cached ?? 0;
       // No cache-write tier documented for Devstral.
+      t.messageCount++;
+    };
+
+    let mt = ctx.byModel.get(model);
+    if (!mt) { mt = emptyTotals(); ctx.byModel.set(model, mt); }
+    addInto(mt);
+
+    const ym = yearMonth(ts);
+    if (ym) {
+      let monthBucket = ctx.byMonth.get(ym);
+      if (!monthBucket) { monthBucket = new Map(); ctx.byMonth.set(ym, monthBucket); }
+      let mmt = monthBucket.get(model);
+      if (!mmt) { mmt = emptyTotals(); monthBucket.set(model, mmt); }
+      addInto(mmt);
+    }
+  }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// OpenAI Codex CLI session scanner. Exact on-disk format is [UNVERIFIED] at
+// the time of writing — Codex was not installed on the authoring machine.
+// See docs/studies/STUDY-codex-tokens.md for the research that shaped this
+// adapter. The scanner probes both full-file JSON (with a
+// messages / output / items array) AND line-by-line JSONL, under
+// `sessions/`, `history/`, or any subdir of the Codex root. Token fields
+// follow the OpenAI Responses API shape (`usage.input_tokens` /
+// `usage.output_tokens` / `usage.input_tokens_details.cached_tokens`).
+// `$CODEX_HOME` overrides the default ~/.codex root.
+// ───────────────────────────────────────────────────────────────────────────
+
+/** Walk Codex root, return every `.json` / `.jsonl` file under the common
+ *  session subdirs (`sessions/`, `history/`) or anywhere under the root
+ *  if those aren't present. Recursive with MAX_SCAN_DEPTH cap. Returns []
+ *  when the root is missing so the caller skips Codex silently. */
+export function findCodexSessions(root: string): string[] {
+  const files: string[] = [];
+  if (!existsSync(root)) return files;
+
+  // Prefer dedicated subdirs if they exist; fall back to scanning the whole
+  // root so a non-standard layout still works.
+  const candidates = [join(root, "sessions"), join(root, "history")].filter(existsSync);
+  const starts = candidates.length > 0 ? candidates : [root];
+
+  const seen = new Set<string>();
+  const stack: Array<[string, number]> = starts.map(s => [s, 0]);
+  while (stack.length > 0) {
+    const [dir, depth] = stack.pop()!;
+    if (seen.has(dir)) continue;
+    seen.add(dir);
+    if (depth > MAX_SCAN_DEPTH) continue;
+    let entries: string[];
+    try { entries = readdirSync(dir); } catch { continue; }
+    for (const name of entries) {
+      // When scanning the root as a fallback, skip the obvious non-session
+      // noise so we don't pull in config / auth / log dotdirs.
+      if (dir === root && (name === "config.toml" || name === "auth.json" || name === "log")) continue;
+      const p = join(dir, name);
+      let sub;
+      try { sub = statSync(p); } catch { continue; }
+      if (sub.isDirectory()) stack.push([p, depth + 1]);
+      else if (sub.isFile() && (name.endsWith(".json") || name.endsWith(".jsonl"))) files.push(p);
+    }
+  }
+  return files;
+}
+
+/** Codex wire id → PRICING key. `codex-priority` is selected only when the
+ *  model string explicitly advertises priority (Codex exposes priority as a
+ *  tier selector rather than a separate model family in most public docs).
+ *  Everything else matching `codex` or `gpt-5` lands on `codex-standard`.
+ *  Unknown strings fall back to `codex-standard` with `matched: false`. */
+export function normalizeCodexModel(m: string | undefined): { key: string; matched: boolean } {
+  if (!m) return { key: "codex-standard", matched: false };
+  const low = m.toLowerCase();
+  if (low.includes("priority")) return { key: "codex-priority", matched: true };
+  if (low.includes("codex")) return { key: "codex-standard", matched: true };
+  if (low.startsWith("gpt-5")) return { key: "codex-standard", matched: true };
+  return { key: "codex-standard", matched: false };
+}
+
+/** Parse one Codex session file and fold assistant turns into the shared
+ *  ScanContext. Accepts a full-JSON object (`{messages|output|items: [...]}`
+ *  or a top-level array) and falls back to JSONL on parse failure.
+ *
+ *  Token mapping — OpenAI Responses API shape:
+ *    usage.input_tokens  = TOTAL input (includes cached tokens)
+ *    usage.input_tokens_details.cached_tokens = cached subset
+ *    usage.output_tokens = total output
+ *
+ *  We subtract cached from total input so the downstream cost math doesn't
+ *  double-count — `inputTokens` ends up as the fresh, non-cached input. */
+export function scanCodexSession(filePath: string, ctx: ScanContext): void {
+  if (fileTooLarge(filePath)) return;
+  let content: string;
+  try { content = readFileSync(filePath, "utf-8"); }
+  catch { return; }
+
+  ctx.totalLines++; // count each session file as one "line" for header stats
+
+  let turns: any[] = [];
+  try {
+    const parsed = JSON.parse(content);
+    if (Array.isArray(parsed)) turns = parsed;
+    else if (Array.isArray(parsed?.messages)) turns = parsed.messages;
+    else if (Array.isArray(parsed?.output)) turns = parsed.output;
+    else if (Array.isArray(parsed?.items)) turns = parsed.items;
+    else if (Array.isArray(parsed?.history)) turns = parsed.history;
+    else turns = [parsed];
+  } catch {
+    for (const raw of content.split("\n")) {
+      if (!raw) continue;
+      try { turns.push(JSON.parse(raw)); } catch { ctx.parseErrors++; }
+    }
+    if (turns.length === 0) return;
+  }
+
+  for (const turn of turns) {
+    const isAssistant =
+      turn?.role === "assistant" ||
+      turn?.type === "assistant" ||
+      turn?.type === "message" ||      // Responses API: type:"message", role:"assistant"
+      turn?.type === "response";        // top-level response event
+    if (!isAssistant && turn?.role !== "assistant") continue;
+    ctx.assistantLines++;
+
+    // Usage may sit on the turn, on a nested `response`, or on a `message`.
+    const usage =
+      turn.usage ??
+      turn.response?.usage ??
+      turn.message?.usage ??
+      null;
+    if (!usage) continue;
+    ctx.withUsage++;
+
+    const rawModel = turn.model ?? turn.response?.model ?? turn.message?.model;
+    const { key: model, matched } = normalizeCodexModel(rawModel);
+    if (!matched && typeof rawModel === "string" && rawModel) ctx.unknownCodexModels.add(rawModel);
+
+    const ts: string | undefined =
+      turn.timestamp ??
+      turn.created_at ??
+      (typeof turn.created === "number" ? new Date(turn.created * 1000).toISOString() : undefined);
+    if (ts && (!ctx.minTs || ts < ctx.minTs)) ctx.minTs = ts;
+    if (ts && (!ctx.maxTs || ts > ctx.maxTs)) ctx.maxTs = ts;
+
+    const addInto = (t: ModelTotals) => {
+      const totalInput = usage.input_tokens ?? usage.prompt_tokens ?? 0;
+      const cached = usage.input_tokens_details?.cached_tokens ?? usage.cached_tokens ?? 0;
+      t.inputTokens     += Math.max(0, totalInput - cached);
+      t.cacheReadTokens += cached;
+      t.outputTokens    += usage.output_tokens ?? usage.completion_tokens ?? 0;
+      // Codex has no cache-write tier (cacheWrite:0 in config.json codex-*).
       t.messageCount++;
     };
 

@@ -71,6 +71,7 @@ describe("scanVibeSession", () => {
     unknownClaudeModels: new Set(),
     unknownGeminiModels: new Set(),
     unknownVibeModels: new Set(),
+    unknownCodexModels: new Set(),
   });
 
   let tmpFile: string;
