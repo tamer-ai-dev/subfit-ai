@@ -10,6 +10,8 @@ import {
   compute5hWindows,
   simulateDowngrade,
   hitRateBadge,
+  groupEventsByMonth,
+  simulateMonthlyQuota,
   type ScanEvent,
 } from "../subfit-ai.ts";
 
@@ -433,5 +435,123 @@ describe("simulateDowngrade + hitRateBadge", () => {
     expect(sim.rows[0].hitCount).toBe(0);
     expect(sim.rows[0].hitPct).toBe(0);
     expect(sim.rows[0].verdict.kind).toBe("smooth");
+  });
+});
+
+describe("groupEventsByMonth + simulateMonthlyQuota", () => {
+  const mk = (ts: string, requestId?: string): ScanEvent => ({
+    ts, inputTokens: 1, outputTokens: 0,
+    cacheReadTokens: 0, cacheCreationTokens: 0,
+    provider: "claude", model: "claude-opus-4",
+    requestId,
+  });
+
+  it("returns [] / empty-rows simulation for empty events", () => {
+    expect(groupEventsByMonth([])).toEqual([]);
+    const sim = simulateMonthlyQuota([], {
+      "copilot-pro": {
+        label: "GitHub Copilot Pro", monthlyUsd: 10,
+        messagesPer5h: null, monthlyMsgCap: 500,
+      },
+    });
+    expect(sim.totalMonths).toBe(0);
+    expect(sim.firstMonth).toBeNull();
+    expect(sim.avgMsgsPerMonth).toBe(0);
+    expect(sim.peakMsgsPerMonth).toBe(0);
+    expect(sim.rows).toHaveLength(1);
+    expect(sim.rows[0].hitCount).toBe(0);
+    expect(sim.rows[0].verdict.kind).toBe("smooth");
+  });
+
+  it("groups events into calendar months, dedups requestId within each month", () => {
+    const events = [
+      // Jan: 2 API calls (3 streamed lines share req-1, then a req-2)
+      mk("2026-01-05T09:00:00Z", "req-1"),
+      mk("2026-01-05T09:00:01Z", "req-1"),
+      mk("2026-01-05T09:00:02Z", "req-1"),
+      mk("2026-01-06T10:00:00Z", "req-2"),
+      // Feb: 1 API call (single event, no requestId → counts as 1)
+      mk("2026-02-14T12:00:00Z"),
+      // Mar: 5 events with 5 distinct requestIds
+      mk("2026-03-01T08:00:00Z", "r1"),
+      mk("2026-03-02T08:00:00Z", "r2"),
+      mk("2026-03-03T08:00:00Z", "r3"),
+      mk("2026-03-04T08:00:00Z", "r4"),
+      mk("2026-03-05T08:00:00Z", "r5"),
+    ];
+    const months = groupEventsByMonth(events);
+    expect(months.map(m => m.yearMonth)).toEqual(["2026-01", "2026-02", "2026-03"]);
+    expect(months[0]).toMatchObject({ yearMonth: "2026-01", eventCount: 4, messageCount: 2 });
+    expect(months[1]).toMatchObject({ yearMonth: "2026-02", eventCount: 1, messageCount: 1 });
+    expect(months[2]).toMatchObject({ yearMonth: "2026-03", eventCount: 5, messageCount: 5 });
+  });
+
+  it("counts months over plan cap and respects hitRateBadge thresholds", () => {
+    // Four months with message counts 100, 600, 1500, 3500.
+    const mkMonth = (base: string, count: number): ScanEvent[] => {
+      const out: ScanEvent[] = [];
+      for (let i = 0; i < count; i++) {
+        out.push(mk(`${base}T00:00:00Z`, `${base}-${i}`));
+      }
+      return out;
+    };
+    const events = [
+      ...mkMonth("2026-01-05", 100),
+      ...mkMonth("2026-02-05", 600),
+      ...mkMonth("2026-03-05", 1500),
+      ...mkMonth("2026-04-05", 3500),
+    ];
+    const months = groupEventsByMonth(events);
+    expect(months).toHaveLength(4);
+    expect(months.map(m => m.messageCount)).toEqual([100, 600, 1500, 3500]);
+
+    const planLimits = {
+      "copilot-free":     { label: "Copilot Free",     monthlyUsd: 0,  messagesPer5h: null, monthlyMsgCap: 2000 },
+      "copilot-pro":      { label: "Copilot Pro",      monthlyUsd: 10, messagesPer5h: null, monthlyMsgCap: 500  },
+      "copilot-business": { label: "Copilot Business", monthlyUsd: 19, messagesPer5h: null, monthlyMsgCap: 1000 },
+      // A plan with NO monthly cap is skipped from the rows entirely.
+      "claude-pro":       { label: "Claude Pro",       monthlyUsd: 20, messagesPer5h: [10, 45] as [number, number] },
+    };
+    const sim = simulateMonthlyQuota(months, planLimits);
+    expect(sim.rows.map(r => r.key)).toEqual(["copilot-free", "copilot-pro", "copilot-business"]);
+    expect(sim.firstMonth).toBe("2026-01");
+    expect(sim.lastMonth).toBe("2026-04");
+    expect(sim.peakMsgsPerMonth).toBe(3500);
+
+    const free = sim.rows.find(r => r.key === "copilot-free")!;
+    expect(free.hitCount).toBe(1);          // only 3500 exceeds 2000
+    expect(free.hitPct).toBeCloseTo(25);
+    expect(free.verdict.kind).toBe("painful"); // 25% → painful
+
+    const pro = sim.rows.find(r => r.key === "copilot-pro")!;
+    expect(pro.hitCount).toBe(3);           // 600, 1500, 3500 exceed 500
+    expect(pro.hitPct).toBe(75);
+    expect(pro.verdict.kind).toBe("unusable"); // >50%
+
+    const biz = sim.rows.find(r => r.key === "copilot-business")!;
+    expect(biz.hitCount).toBe(2);           // 1500 and 3500 exceed 1000
+    expect(biz.verdict.kind).toBe("painful"); // 50%
+  });
+
+  it("treats a partial month as one entry (hit % uses raw month count)", () => {
+    // Single month with just 3 days of activity — still counts as one
+    // full 'month' in the simulation. Downstream users are responsible
+    // for interpreting that number; we do not annotate completeness.
+    const events = [
+      mk("2026-04-22T09:00:00Z", "r1"),
+      mk("2026-04-23T09:00:00Z", "r2"),
+      mk("2026-04-24T09:00:00Z", "r3"),
+    ];
+    const months = groupEventsByMonth(events);
+    expect(months).toHaveLength(1);
+    expect(months[0].messageCount).toBe(3);
+
+    const sim = simulateMonthlyQuota(months, {
+      "tiny": { label: "Tiny", monthlyUsd: 1, messagesPer5h: null, monthlyMsgCap: 2 },
+    });
+    expect(sim.totalMonths).toBe(1);
+    expect(sim.rows[0].hitCount).toBe(1);
+    expect(sim.rows[0].hitPct).toBe(100);
+    expect(sim.rows[0].verdict.kind).toBe("unusable");
   });
 });

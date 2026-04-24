@@ -55,6 +55,11 @@ interface PlanLimits {
   messagesPer5h: [number, number | null] | null;
   /** Max sessions (~distinct JSONL files) per month; null = no session cap. */
   sessionsCap?: number | null;
+  /** Monthly message cap used by the monthly-quota simulation. Plans
+   *  without a published monthly message ceiling (or that meter on
+   *  sessions/tokens instead) omit this. Calendar-month aggregation
+   *  dedups events by requestId — same accounting as the 5h sim. */
+  monthlyMsgCap?: number | null;
   /** Short note shown alongside verdict. */
   note?: string;
 }
@@ -1792,6 +1797,112 @@ function priceStr(usd: number | null): string {
   return usd === null ? "custom pricing" : `$${usd}/mo`;
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// Monthly quota simulation
+//
+// Same event stream the 5h sim uses, grouped by YYYY-MM instead of 5h
+// rolling windows. Answers "on a plan with a monthly message cap (e.g.
+// GitHub Copilot), how many calendar months would I have blown past
+// the ceiling?"
+//
+// Like compute5hWindows, messageCount dedups events by requestId so a
+// single API call's streamed content blocks don't over-count.
+// ───────────────────────────────────────────────────────────────────────────
+
+export interface MonthBucket {
+  /** Calendar month (YYYY-MM). */
+  yearMonth: string;
+  /** Raw count of ScanEvent records in this month. */
+  eventCount: number;
+  /** Distinct-requestId message count for this month. Events without
+   *  a requestId count as 1 each (same rule as 5h windows). */
+  messageCount: number;
+}
+
+/** Group events into calendar-month buckets. Stable output order
+ *  (ascending YYYY-MM). */
+export function groupEventsByMonth(events: ScanEvent[]): MonthBucket[] {
+  const byMonth = new Map<string, { eventCount: number; seen: Set<string>; missingIds: number }>();
+  for (const ev of events) {
+    const ym = yearMonth(ev.ts);
+    if (!ym) continue;
+    let m = byMonth.get(ym);
+    if (!m) { m = { eventCount: 0, seen: new Set(), missingIds: 0 }; byMonth.set(ym, m); }
+    m.eventCount++;
+    if (ev.requestId) m.seen.add(ev.requestId);
+    else m.missingIds++;
+  }
+  const out: MonthBucket[] = [];
+  for (const [ym, m] of byMonth) {
+    out.push({ yearMonth: ym, eventCount: m.eventCount, messageCount: m.seen.size + m.missingIds });
+  }
+  out.sort((a, b) => a.yearMonth.localeCompare(b.yearMonth));
+  return out;
+}
+
+export interface MonthlyRow {
+  key: string;
+  label: string;
+  monthlyUsd: number | null;
+  /** Published monthly message cap for this plan. */
+  monthlyCap: number;
+  totalMonths: number;
+  hitCount: number;
+  hitPct: number;
+  verdict: { kind: HitRateKind; badge: string };
+  /** Short plan note, pass-through from config. */
+  note?: string;
+}
+
+export interface MonthlySimulation {
+  totalMonths: number;
+  firstMonth: string | null;
+  lastMonth: string | null;
+  avgMsgsPerMonth: number;
+  peakMsgsPerMonth: number;
+  rows: MonthlyRow[];
+}
+
+export function simulateMonthlyQuota(
+  months: MonthBucket[],
+  planLimits: Record<string, PlanLimits>,
+): MonthlySimulation {
+  const rows: MonthlyRow[] = [];
+  for (const [key, plan] of Object.entries(planLimits)) {
+    const cap = plan.monthlyMsgCap;
+    if (cap == null || cap <= 0) continue;
+    let hitCount = 0;
+    for (const m of months) {
+      if (m.messageCount > cap) hitCount++;
+    }
+    const hitPct = months.length === 0 ? 0 : (hitCount / months.length) * 100;
+    rows.push({
+      key, label: plan.label, monthlyUsd: plan.monthlyUsd,
+      monthlyCap: cap,
+      totalMonths: months.length,
+      hitCount, hitPct,
+      verdict: hitRateBadge(hitPct),
+      note: plan.note,
+    });
+  }
+  rows.sort((a, b) => (a.monthlyUsd ?? Infinity) - (b.monthlyUsd ?? Infinity));
+
+  let totalMsgs = 0, peak = 0;
+  for (const m of months) {
+    totalMsgs += m.messageCount;
+    if (m.messageCount > peak) peak = m.messageCount;
+  }
+  const avgMsgsPerMonth = months.length === 0 ? 0 : totalMsgs / months.length;
+
+  return {
+    totalMonths: months.length,
+    firstMonth: months.length ? months[0].yearMonth : null,
+    lastMonth:  months.length ? months[months.length - 1].yearMonth : null,
+    avgMsgsPerMonth, peakMsgsPerMonth: peak,
+    rows,
+  };
+}
+
 function primaryReason(p: PlanStatus): string {
   if (p.verdict.startsWith("unlimited")) return "unlimited 5h throughput";
   if (p.verdict.startsWith("FITS at high-usage")) return "fits within high-usage band";
@@ -1878,6 +1989,35 @@ function renderDowngradeSection(sim: DowngradeSimulation, daysSpanned: number): 
       r.monthlyUsd === null ? "custom" : `$${r.monthlyUsd}`,
       r.msgsPer5h.toLocaleString(),
       `${r.hitCount.toLocaleString()} / ${r.totalWindows.toLocaleString()}`,
+      `${r.hitPct.toFixed(1)}%`,
+      r.verdict.badge,
+    ]);
+  }
+  out.push(renderTable(header, body).join("\n"));
+  return out.join("\n") + "\n";
+}
+
+/** Render the monthly-quota simulation table. Empty string when there
+ *  are no months or no plans with monthly caps. */
+function renderMonthlySimSection(sim: MonthlySimulation): string {
+  if (sim.totalMonths === 0 || sim.rows.length === 0) return "";
+
+  const out: string[] = [];
+  const span = sim.firstMonth && sim.lastMonth
+    ? (sim.firstMonth === sim.lastMonth ? sim.firstMonth : `${sim.firstMonth} to ${sim.lastMonth}`)
+    : "";
+  out.push(`${sim.totalMonths.toLocaleString()} month(s) analyzed${span ? ` (${span})` : ""}`);
+  out.push(`Avg messages per month: ${Math.round(sim.avgMsgsPerMonth).toLocaleString()} / Peak: ${sim.peakMsgsPerMonth.toLocaleString()}`);
+  out.push("");
+
+  const header = ["Plan", "Price/mo", "Monthly cap", "Months over cap", "Hit %", "Verdict"];
+  const body: string[][] = [];
+  for (const r of sim.rows) {
+    body.push([
+      r.label,
+      r.monthlyUsd === null ? "custom" : `$${r.monthlyUsd}`,
+      `${r.monthlyCap.toLocaleString()} msgs`,
+      `${r.hitCount.toLocaleString()} / ${r.totalMonths.toLocaleString()}`,
       `${r.hitPct.toFixed(1)}%`,
       r.verdict.badge,
     ]);
@@ -2348,6 +2488,8 @@ function main(): number {
   // were retained AND at least one plan carries a `tokensPer5h` cap.
   const windows = compute5hWindows(ctx.events);
   const downgradeSim = simulateDowngrade(windows, planLimits);
+  const monthBuckets = groupEventsByMonth(ctx.events);
+  const monthlySim = simulateMonthlyQuota(monthBuckets, planLimits);
 
   if (args.json) {
     const payload = {
@@ -2381,6 +2523,7 @@ function main(): number {
       subscriptionVerdicts,
       bestFit: bestFitPayload,
       downgradeSimulation: downgradeSim,
+      monthlyQuotaSimulation: monthlySim,
       byModel: rows,
       byMonth: Object.fromEntries(
         [...ctx.byMonth.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([ym, bucket]) => [
@@ -2431,6 +2574,11 @@ function main(): number {
   if (downgradeBlock) {
     out.push("── 5h-window downgrade simulation (message-based) ──");
     out.push(downgradeBlock);
+  }
+  const monthlyBlock = renderMonthlySimSection(monthlySim);
+  if (monthlyBlock) {
+    out.push("── Monthly quota simulation ──");
+    out.push(monthlyBlock);
   }
   out.push("── Per model ──");
   out.push(renderModelSection(rows));
