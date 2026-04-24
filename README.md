@@ -25,7 +25,8 @@ write to disk.
 > First time looking at this output? Read
 > [**docs/how-to-read-the-report.md**](docs/how-to-read-the-report.md)
 > — it walks each section top-to-bottom and explains what every column
-> actually measures.
+> actually measures. For the provider documentation links behind every
+> cap in the config, see [**docs/sources.md**](docs/sources.md).
 
 ```
 ── Scan summary ──
