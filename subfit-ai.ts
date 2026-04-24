@@ -49,6 +49,15 @@ interface PlanLimits {
    *                      compares against `lo` only (Claude Max tiers).
    */
   messagesPer5h: [number, number | null] | null;
+  /**
+   * Tokens per 5-hour window (input + output). Used by the downgrade
+   * simulation to count how many real 5h windows would have exceeded
+   * the plan's cap. Numbers are community estimates — Anthropic does
+   * not publish official figures — so every entry needs a
+   * `_tokensSource` field alongside citing the reference.
+   * Undefined / null → plan is skipped in the simulation.
+   */
+  tokensPer5h?: number | null;
   /** Max sessions (~distinct JSONL files) per month; null = no session cap. */
   sessionsCap?: number | null;
   /** Short note shown alongside verdict. */
@@ -1601,6 +1610,142 @@ function findBestFit(stats: SubscriptionStats, planLimits: Record<string, PlanLi
   return { primary, cheaperMarginal, marginal: marginalOnly, headroomAlt };
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// 5h window downgrade simulation
+//
+// Models Claude's rate-limit window directly: reset-on-expiry. A window
+// opens on the first message, closes exactly 5h later; the *next* window
+// opens on the first message AFTER that close. Messages during the closed
+// interval don't count toward any window (the user was idle — no pressure
+// on the limit).
+//
+// This is the shape that matches "how many times would I have been
+// throttled?" — tumbling midnight-anchored buckets would split a single
+// real burst across two buckets and inflate the hit count.
+// ───────────────────────────────────────────────────────────────────────────
+
+const WINDOW_MS = 5 * 60 * 60 * 1000;
+
+export interface WindowBucket {
+  /** ISO timestamp of the first event in the window (window open). */
+  startTs: string;
+  /** ISO timestamp of 5h after startTs (window close). */
+  endTs: string;
+  /** Number of events folded into this window. */
+  eventCount: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  /** input + output. The quantity compared against plan `tokensPer5h`. */
+  totalTokens: number;
+}
+
+/** Bucket events into reset-on-expiry 5h windows. Input does not need to
+ *  be sorted — we sort a copy here so callers can pass raw ctx.events. */
+export function compute5hWindows(events: ScanEvent[]): WindowBucket[] {
+  if (events.length === 0) return [];
+  const sorted = events.slice();
+  sortEvents(sorted);
+
+  const windows: WindowBucket[] = [];
+  let cur: WindowBucket | null = null;
+  let curStartMs = 0;
+
+  for (const ev of sorted) {
+    const t = new Date(ev.ts).getTime();
+    if (isNaN(t)) continue;
+    if (cur === null || t - curStartMs >= WINDOW_MS) {
+      // Previous window (if any) is already sealed; open a new one on
+      // this event's timestamp.
+      curStartMs = t;
+      cur = {
+        startTs: ev.ts,
+        endTs: new Date(t + WINDOW_MS).toISOString(),
+        eventCount: 0,
+        inputTokens: 0, outputTokens: 0,
+        cacheReadTokens: 0, cacheCreationTokens: 0,
+        totalTokens: 0,
+      };
+      windows.push(cur);
+    }
+    cur.eventCount++;
+    cur.inputTokens        += ev.inputTokens;
+    cur.outputTokens       += ev.outputTokens;
+    cur.cacheReadTokens    += ev.cacheReadTokens;
+    cur.cacheCreationTokens += ev.cacheCreationTokens;
+    cur.totalTokens        += ev.inputTokens + ev.outputTokens;
+  }
+
+  return windows;
+}
+
+/** Verdict for a downgrade simulation hit-rate.
+ *  0-2%   → "good" (rare throttling, safe to downgrade)
+ *  2-10%  → "ok"   (occasional throttling, acceptable)
+ *  >10%   → "bad"  (frequent throttling, do not downgrade)
+ */
+export function hitRateBadge(hitPct: number): { kind: "good" | "ok" | "bad"; badge: string } {
+  if (hitPct <= 2) return { kind: "good", badge: "✓ good" };
+  if (hitPct <= 10) return { kind: "ok",   badge: "⚠ ok"   };
+  return                  { kind: "bad",  badge: "❌ bad"  };
+}
+
+export interface DowngradeRow {
+  key: string;
+  label: string;
+  monthlyUsd: number | null;
+  tokensPer5h: number;
+  totalWindows: number;
+  hitCount: number;
+  hitPct: number;
+  /** Median overflow = median(totalTokens - cap) among HIT windows only.
+   *  0 when hitCount === 0. */
+  medianOverflow: number;
+  /** Max overflow = max(totalTokens - cap) among hit windows. 0 when none. */
+  maxOverflow: number;
+  verdict: { kind: "good" | "ok" | "bad"; badge: string };
+}
+
+export interface DowngradeSimulation {
+  totalWindows: number;
+  rows: DowngradeRow[];
+}
+
+export function simulateDowngrade(
+  windows: WindowBucket[],
+  planLimits: Record<string, PlanLimits>,
+): DowngradeSimulation {
+  const rows: DowngradeRow[] = [];
+  for (const [key, plan] of Object.entries(planLimits)) {
+    const cap = plan.tokensPer5h;
+    if (cap == null || cap <= 0) continue;
+    const overflows: number[] = [];
+    for (const w of windows) {
+      if (w.totalTokens > cap) overflows.push(w.totalTokens - cap);
+    }
+    const hitCount = overflows.length;
+    const hitPct = windows.length === 0 ? 0 : (hitCount / windows.length) * 100;
+    overflows.sort((a, b) => a - b);
+    const medianOverflow = hitCount === 0
+      ? 0
+      : overflows[Math.floor((hitCount - 1) / 2)];
+    const maxOverflow = hitCount === 0 ? 0 : overflows[hitCount - 1];
+    rows.push({
+      key, label: plan.label, monthlyUsd: plan.monthlyUsd,
+      tokensPer5h: cap,
+      totalWindows: windows.length,
+      hitCount, hitPct,
+      medianOverflow, maxOverflow,
+      verdict: hitRateBadge(hitPct),
+    });
+  }
+  // Cheapest plans first — same ordering as the rest of the subscription
+  // section, so users read downgrade risk bottom-up.
+  rows.sort((a, b) => (a.monthlyUsd ?? Infinity) - (b.monthlyUsd ?? Infinity));
+  return { totalWindows: windows.length, rows };
+}
+
 function priceStr(usd: number | null): string {
   return usd === null ? "custom pricing" : `$${usd}/mo`;
 }
@@ -1668,6 +1813,36 @@ function renderSubscriptionSection(stats: SubscriptionStats, planLimits: Record<
   // tables in main() so the subscription → tables → warnings flow reads
   // cleanly. See the terminal-output section of main().
   return parts.join("\n") + "\n";
+}
+
+/** Render the 5h-window downgrade simulation table. Shown only when
+ *  events are available AND at least one plan has a `tokensPer5h` value.
+ *  Empty string otherwise — the caller decides whether to print anything. */
+function renderDowngradeSection(sim: DowngradeSimulation): string {
+  if (sim.totalWindows === 0 || sim.rows.length === 0) return "";
+
+  const out: string[] = [];
+  out.push(`5h-window downgrade simulation (reset-on-expiry, ${sim.totalWindows.toLocaleString()} active windows)`);
+  out.push("  Token caps are community estimates — Anthropic publishes message-count bands only.");
+  out.push("  A window 'hits' when input+output tokens exceed the plan's 5h token cap.");
+  out.push("");
+
+  const header = ["Plan", "Price/mo", "Token cap (5h)", "Windows over cap", "Hit %", "Median overflow", "Max overflow", "Verdict"];
+  const body: string[][] = [];
+  for (const r of sim.rows) {
+    body.push([
+      r.label,
+      r.monthlyUsd === null ? "custom" : `$${r.monthlyUsd}`,
+      fmtTokens(r.tokensPer5h),
+      `${r.hitCount.toLocaleString()} / ${r.totalWindows.toLocaleString()}`,
+      `${r.hitPct.toFixed(1)}%`,
+      r.hitCount > 0 ? fmtTokens(r.medianOverflow) : "—",
+      r.hitCount > 0 ? fmtTokens(r.maxOverflow) : "—",
+      r.verdict.badge,
+    ]);
+  }
+  out.push(renderTable(header, body).join("\n"));
+  return out.join("\n") + "\n";
 }
 
 function renderScanSummary(providers: ProviderStats[], ctx: ScanContext, configSource: string): string {
@@ -2128,6 +2303,11 @@ function main(): number {
     headroomAlt: stripPrice(bestFit.headroomAlt),
   };
 
+  // 5h-window downgrade simulation. Only runs when per-message events
+  // were retained AND at least one plan carries a `tokensPer5h` cap.
+  const windows = compute5hWindows(ctx.events);
+  const downgradeSim = simulateDowngrade(windows, planLimits);
+
   if (args.json) {
     const payload = {
       path: args.path,
@@ -2159,6 +2339,7 @@ function main(): number {
       subscriptionStats: subStats,
       subscriptionVerdicts,
       bestFit: bestFitPayload,
+      downgradeSimulation: downgradeSim,
       byModel: rows,
       byMonth: Object.fromEntries(
         [...ctx.byMonth.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([ym, bucket]) => [
@@ -2205,6 +2386,11 @@ function main(): number {
   // the per-model / per-month tables follow as supporting evidence.
   out.push("── Subscription comparison ──");
   out.push(renderSubscriptionSection(subStats, planLimits));
+  const downgradeBlock = renderDowngradeSection(downgradeSim);
+  if (downgradeBlock) {
+    out.push("── 5h-window downgrade simulation ──");
+    out.push(downgradeBlock);
+  }
   out.push("── Per model ──");
   out.push(renderModelSection(rows));
   if (args.monthly) {

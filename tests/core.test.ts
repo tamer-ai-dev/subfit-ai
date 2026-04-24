@@ -7,6 +7,9 @@ import {
   computeSubscriptionStats,
   sanitizeForTerminal,
   sortEvents,
+  compute5hWindows,
+  simulateDowngrade,
+  hitRateBadge,
   type ScanEvent,
 } from "../subfit-ai.ts";
 
@@ -220,5 +223,134 @@ describe("sortEvents", () => {
     expect(arr).toEqual([a, b, c]);
     expect(arr[0].inputTokens).toBe(1);
     expect(arr[1].inputTokens).toBe(2);
+  });
+});
+
+describe("compute5hWindows", () => {
+  const mk = (ts: string, inTok: number, outTok: number): ScanEvent => ({
+    ts, inputTokens: inTok, outputTokens: outTok,
+    cacheReadTokens: 0, cacheCreationTokens: 0,
+    provider: "claude", model: "claude-opus-4",
+  });
+
+  it("returns [] for empty input", () => {
+    expect(compute5hWindows([])).toEqual([]);
+  });
+
+  it("folds all events <5h from window-open into a single bucket", () => {
+    const events = [
+      mk("2026-03-10T09:00:00Z", 1000, 200),
+      mk("2026-03-10T11:30:00Z", 500, 100),
+      mk("2026-03-10T13:59:00Z", 2000, 400), // 4h59m after open — still inside
+    ];
+    const w = compute5hWindows(events);
+    expect(w).toHaveLength(1);
+    expect(w[0].startTs).toBe("2026-03-10T09:00:00Z");
+    expect(w[0].endTs).toBe("2026-03-10T14:00:00.000Z"); // toISOString always emits .000Z
+    expect(w[0].eventCount).toBe(3);
+    expect(w[0].inputTokens).toBe(3500);
+    expect(w[0].outputTokens).toBe(700);
+    expect(w[0].totalTokens).toBe(4200);
+  });
+
+  it("opens a new window reset-on-expiry when an event lands >=5h after open", () => {
+    const events = [
+      mk("2026-03-10T09:00:00Z", 1000, 0),
+      mk("2026-03-10T14:00:00Z", 2000, 0),  // exactly 5h → new window
+      mk("2026-03-10T15:00:00Z", 500, 0),   // inside the second window
+      mk("2026-03-10T23:00:00Z", 100, 0),   // >5h after second open (9h) → third
+    ];
+    const w = compute5hWindows(events);
+    expect(w).toHaveLength(3);
+    expect(w[0].startTs).toBe("2026-03-10T09:00:00Z");
+    expect(w[0].eventCount).toBe(1);
+    expect(w[1].startTs).toBe("2026-03-10T14:00:00Z");
+    expect(w[1].eventCount).toBe(2);
+    expect(w[1].totalTokens).toBe(2500);
+    expect(w[2].startTs).toBe("2026-03-10T23:00:00Z");
+    expect(w[2].eventCount).toBe(1);
+  });
+
+  it("sorts unordered input before bucketing", () => {
+    const events = [
+      mk("2026-03-10T13:00:00Z", 100, 0),
+      mk("2026-03-10T09:00:00Z", 500, 0),
+      mk("2026-03-10T11:00:00Z", 200, 0),
+    ];
+    const w = compute5hWindows(events);
+    expect(w).toHaveLength(1);
+    expect(w[0].startTs).toBe("2026-03-10T09:00:00Z");
+    expect(w[0].inputTokens).toBe(800);
+    // Input array is not mutated — callers pass raw ctx.events freely.
+    expect(events[0].ts).toBe("2026-03-10T13:00:00Z");
+  });
+});
+
+describe("simulateDowngrade + hitRateBadge", () => {
+  const mk = (ts: string, total: number): ScanEvent => ({
+    ts, inputTokens: total, outputTokens: 0,
+    cacheReadTokens: 0, cacheCreationTokens: 0,
+    provider: "claude", model: "claude-opus-4",
+  });
+
+  it("hitRateBadge thresholds: 0-2% good, 2-10% ok, >10% bad", () => {
+    expect(hitRateBadge(0).kind).toBe("good");
+    expect(hitRateBadge(2).kind).toBe("good");
+    expect(hitRateBadge(2.01).kind).toBe("ok");
+    expect(hitRateBadge(10).kind).toBe("ok");
+    expect(hitRateBadge(10.01).kind).toBe("bad");
+    expect(hitRateBadge(50).kind).toBe("bad");
+  });
+
+  it("counts windows over cap and computes median/max overflow", () => {
+    // Three windows (one per day, >5h apart). Totals: 50k, 100k, 200k.
+    const events = [
+      mk("2026-03-10T09:00:00Z", 50000),
+      mk("2026-03-11T09:00:00Z", 100000),
+      mk("2026-03-12T09:00:00Z", 200000),
+    ];
+    const windows = compute5hWindows(events);
+    expect(windows).toHaveLength(3);
+
+    const planLimits = {
+      "claude-pro":   { label: "Claude Pro",   monthlyUsd: 20,  messagesPer5h: [10, 45] as [number, number], tokensPer5h: 44000 },
+      "claude-max-5": { label: "Claude Max 5", monthlyUsd: 100, messagesPer5h: [225, null] as [number, null], tokensPer5h: 88000 },
+      "claude-max-20":{ label: "Claude Max 20",monthlyUsd: 200, messagesPer5h: [900, null] as [number, null], tokensPer5h: 220000 },
+      // No tokensPer5h → should be skipped entirely.
+      "openai-plus":  { label: "OpenAI Plus",  monthlyUsd: 20,  messagesPer5h: [10, 60] as [number, number] },
+    };
+    const sim = simulateDowngrade(windows, planLimits);
+    // openai-plus has no tokensPer5h, so it's absent from the rows.
+    expect(sim.rows.map(r => r.key)).toEqual(["claude-pro", "claude-max-5", "claude-max-20"]);
+
+    const pro = sim.rows.find(r => r.key === "claude-pro")!;
+    expect(pro.hitCount).toBe(3);  // all three windows exceed 44k
+    expect(pro.hitPct).toBeCloseTo(100);
+    expect(pro.verdict.kind).toBe("bad");
+    // Overflows: 6k, 56k, 156k → median = 56k, max = 156k
+    expect(pro.medianOverflow).toBe(56000);
+    expect(pro.maxOverflow).toBe(156000);
+
+    const max5 = sim.rows.find(r => r.key === "claude-max-5")!;
+    expect(max5.hitCount).toBe(2); // 100k and 200k exceed 88k
+    expect(max5.verdict.kind).toBe("bad");
+
+    const max20 = sim.rows.find(r => r.key === "claude-max-20")!;
+    expect(max20.hitCount).toBe(0); // none exceed 220k
+    expect(max20.verdict.kind).toBe("good");
+    expect(max20.medianOverflow).toBe(0);
+    expect(max20.maxOverflow).toBe(0);
+  });
+
+  it("returns empty rows for empty windows (no divide-by-zero)", () => {
+    const planLimits = {
+      "claude-pro": { label: "Claude Pro", monthlyUsd: 20, messagesPer5h: [10, 45] as [number, number], tokensPer5h: 44000 },
+    };
+    const sim = simulateDowngrade([], planLimits);
+    expect(sim.totalWindows).toBe(0);
+    expect(sim.rows).toHaveLength(1);
+    expect(sim.rows[0].hitCount).toBe(0);
+    expect(sim.rows[0].hitPct).toBe(0);
+    expect(sim.rows[0].verdict.kind).toBe("good");
   });
 });
