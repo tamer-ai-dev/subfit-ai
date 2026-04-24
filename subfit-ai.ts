@@ -42,22 +42,17 @@ interface PlanLimits {
   /** USD per month; null = custom / contact sales (e.g. Enterprise tiers). */
   monthlyUsd: number | null;
   /**
-   * Messages per 5-hour window.
+   * Messages per 5-hour window. This is also the quantity the downgrade
+   * simulation measures against: Anthropic rate-limits by message count,
+   * not by tokens (cache-reads especially don't count as new requests).
    *   null             → truly unlimited (rate-limited only; e.g. Enterprise).
    *   [lo, hi]         → fixed band; verdict compares against both bounds.
+   *                      Simulation uses `hi` as the effective cap.
    *   [lo, null]       → "lo+" baseline with no published ceiling; verdict
    *                      compares against `lo` only (Claude Max tiers).
+   *                      Simulation uses `lo` as the effective cap.
    */
   messagesPer5h: [number, number | null] | null;
-  /**
-   * Tokens per 5-hour window (input + output). Used by the downgrade
-   * simulation to count how many real 5h windows would have exceeded
-   * the plan's cap. Numbers are community estimates — Anthropic does
-   * not publish official figures — so every entry needs a
-   * `_tokensSource` field alongside citing the reference.
-   * Undefined / null → plan is skipped in the simulation.
-   */
-  tokensPer5h?: number | null;
   /** Max sessions (~distinct JSONL files) per month; null = no session cap. */
   sessionsCap?: number | null;
   /** Short note shown alongside verdict. */
@@ -1681,34 +1676,48 @@ export function compute5hWindows(events: ScanEvent[]): WindowBucket[] {
 }
 
 /** Verdict for a downgrade simulation hit-rate.
- *  0-2%   → "good" (rare throttling, safe to downgrade)
- *  2-10%  → "ok"   (occasional throttling, acceptable)
- *  >10%   → "bad"  (frequent throttling, do not downgrade)
+ *   0-2%    → "smooth"   (rare throttling, safe to downgrade)
+ *   2-10%   → "workable" (occasional throttling, tolerable)
+ *   10-50%  → "painful"  (frequent throttling)
+ *   >50%    → "unusable" (you would hit the cap in the majority of active windows)
  */
-export function hitRateBadge(hitPct: number): { kind: "good" | "ok" | "bad"; badge: string } {
-  if (hitPct <= 2) return { kind: "good", badge: "✓ good" };
-  if (hitPct <= 10) return { kind: "ok",   badge: "⚠ ok"   };
-  return                  { kind: "bad",  badge: "❌ bad"  };
+export type HitRateKind = "smooth" | "workable" | "painful" | "unusable";
+
+export function hitRateBadge(hitPct: number): { kind: HitRateKind; badge: string } {
+  if (hitPct <= 2)  return { kind: "smooth",   badge: "smooth"   };
+  if (hitPct <= 10) return { kind: "workable", badge: "workable" };
+  if (hitPct <= 50) return { kind: "painful",  badge: "painful"  };
+  return                   { kind: "unusable", badge: "unusable" };
+}
+
+/** Collapse a [lo, hi]-style messagesPer5h band into a single effective
+ *  cap for the downgrade simulation. hi wins when published (Pro/Team);
+ *  lo is used for open-ended "lo+" baselines (Max tiers). Null plans
+ *  have no cap and are skipped upstream. */
+export function effectiveMsgCap(range: [number, number | null] | null): number | null {
+  if (range === null) return null;
+  const [lo, hi] = range;
+  return hi ?? lo;
 }
 
 export interface DowngradeRow {
   key: string;
   label: string;
   monthlyUsd: number | null;
-  tokensPer5h: number;
+  /** Effective cap applied: hi for fixed bands, lo for "lo+" baselines. */
+  msgsPer5h: number;
   totalWindows: number;
   hitCount: number;
   hitPct: number;
-  /** Median overflow = median(totalTokens - cap) among HIT windows only.
-   *  0 when hitCount === 0. */
-  medianOverflow: number;
-  /** Max overflow = max(totalTokens - cap) among hit windows. 0 when none. */
-  maxOverflow: number;
-  verdict: { kind: "good" | "ok" | "bad"; badge: string };
+  verdict: { kind: HitRateKind; badge: string };
 }
 
 export interface DowngradeSimulation {
   totalWindows: number;
+  /** Average priced assistant messages per active window. 0 when no windows. */
+  avgMsgsPerWindow: number;
+  /** Max priced assistant messages seen in any single window. */
+  peakMsgsPerWindow: number;
   rows: DowngradeRow[];
 }
 
@@ -1718,32 +1727,36 @@ export function simulateDowngrade(
 ): DowngradeSimulation {
   const rows: DowngradeRow[] = [];
   for (const [key, plan] of Object.entries(planLimits)) {
-    const cap = plan.tokensPer5h;
+    const cap = effectiveMsgCap(plan.messagesPer5h);
     if (cap == null || cap <= 0) continue;
-    const overflows: number[] = [];
+    let hitCount = 0;
     for (const w of windows) {
-      if (w.totalTokens > cap) overflows.push(w.totalTokens - cap);
+      if (w.eventCount > cap) hitCount++;
     }
-    const hitCount = overflows.length;
     const hitPct = windows.length === 0 ? 0 : (hitCount / windows.length) * 100;
-    overflows.sort((a, b) => a - b);
-    const medianOverflow = hitCount === 0
-      ? 0
-      : overflows[Math.floor((hitCount - 1) / 2)];
-    const maxOverflow = hitCount === 0 ? 0 : overflows[hitCount - 1];
     rows.push({
       key, label: plan.label, monthlyUsd: plan.monthlyUsd,
-      tokensPer5h: cap,
+      msgsPer5h: cap,
       totalWindows: windows.length,
       hitCount, hitPct,
-      medianOverflow, maxOverflow,
       verdict: hitRateBadge(hitPct),
     });
   }
-  // Cheapest plans first — same ordering as the rest of the subscription
-  // section, so users read downgrade risk bottom-up.
+  // Cheapest plans first — users read downgrade risk bottom-up.
   rows.sort((a, b) => (a.monthlyUsd ?? Infinity) - (b.monthlyUsd ?? Infinity));
-  return { totalWindows: windows.length, rows };
+
+  let totalMsgs = 0, peak = 0;
+  for (const w of windows) {
+    totalMsgs += w.eventCount;
+    if (w.eventCount > peak) peak = w.eventCount;
+  }
+  const avgMsgsPerWindow = windows.length === 0 ? 0 : totalMsgs / windows.length;
+
+  return {
+    totalWindows: windows.length,
+    avgMsgsPerWindow, peakMsgsPerWindow: peak,
+    rows,
+  };
 }
 
 function priceStr(usd: number | null): string {
@@ -1815,29 +1828,28 @@ function renderSubscriptionSection(stats: SubscriptionStats, planLimits: Record<
   return parts.join("\n") + "\n";
 }
 
-/** Render the 5h-window downgrade simulation table. Shown only when
- *  events are available AND at least one plan has a `tokensPer5h` value.
- *  Empty string otherwise — the caller decides whether to print anything. */
-function renderDowngradeSection(sim: DowngradeSimulation): string {
+/** Render the 5h-window downgrade simulation table (message-based).
+ *  Shown only when events are available. Empty string otherwise — the
+ *  caller decides whether to print anything. `daysSpanned` is the full
+ *  span of the scan (same number as the subscription-section header),
+ *  surfaced here so users can sanity-check the window density. */
+function renderDowngradeSection(sim: DowngradeSimulation, daysSpanned: number): string {
   if (sim.totalWindows === 0 || sim.rows.length === 0) return "";
 
   const out: string[] = [];
-  out.push(`5h-window downgrade simulation (reset-on-expiry, ${sim.totalWindows.toLocaleString()} active windows)`);
-  out.push("  Token caps are community estimates — Anthropic publishes message-count bands only.");
-  out.push("  A window 'hits' when input+output tokens exceed the plan's 5h token cap.");
+  out.push(`${sim.totalWindows.toLocaleString()} active 5h windows analyzed over ${daysSpanned.toFixed(0)} days`);
+  out.push(`Avg messages per window: ${Math.round(sim.avgMsgsPerWindow).toLocaleString()} / Peak: ${sim.peakMsgsPerWindow.toLocaleString()}`);
   out.push("");
 
-  const header = ["Plan", "Price/mo", "Token cap (5h)", "Windows over cap", "Hit %", "Median overflow", "Max overflow", "Verdict"];
+  const header = ["Plan", "Price/mo", "Msg cap (5h)", "Windows over cap", "Hit %", "Verdict"];
   const body: string[][] = [];
   for (const r of sim.rows) {
     body.push([
       r.label,
       r.monthlyUsd === null ? "custom" : `$${r.monthlyUsd}`,
-      fmtTokens(r.tokensPer5h),
+      r.msgsPer5h.toLocaleString(),
       `${r.hitCount.toLocaleString()} / ${r.totalWindows.toLocaleString()}`,
       `${r.hitPct.toFixed(1)}%`,
-      r.hitCount > 0 ? fmtTokens(r.medianOverflow) : "—",
-      r.hitCount > 0 ? fmtTokens(r.maxOverflow) : "—",
       r.verdict.badge,
     ]);
   }
@@ -2386,9 +2398,9 @@ function main(): number {
   // the per-model / per-month tables follow as supporting evidence.
   out.push("── Subscription comparison ──");
   out.push(renderSubscriptionSection(subStats, planLimits));
-  const downgradeBlock = renderDowngradeSection(downgradeSim);
+  const downgradeBlock = renderDowngradeSection(downgradeSim, subStats.daysSpanned);
   if (downgradeBlock) {
-    out.push("── 5h-window downgrade simulation ──");
+    out.push("── 5h-window downgrade simulation (message-based) ──");
     out.push(downgradeBlock);
   }
   out.push("── Per model ──");

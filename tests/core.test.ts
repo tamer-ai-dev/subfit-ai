@@ -287,70 +287,87 @@ describe("compute5hWindows", () => {
 });
 
 describe("simulateDowngrade + hitRateBadge", () => {
-  const mk = (ts: string, total: number): ScanEvent => ({
-    ts, inputTokens: total, outputTokens: 0,
+  const mk = (ts: string): ScanEvent => ({
+    ts, inputTokens: 1, outputTokens: 1,
     cacheReadTokens: 0, cacheCreationTokens: 0,
     provider: "claude", model: "claude-opus-4",
   });
 
-  it("hitRateBadge thresholds: 0-2% good, 2-10% ok, >10% bad", () => {
-    expect(hitRateBadge(0).kind).toBe("good");
-    expect(hitRateBadge(2).kind).toBe("good");
-    expect(hitRateBadge(2.01).kind).toBe("ok");
-    expect(hitRateBadge(10).kind).toBe("ok");
-    expect(hitRateBadge(10.01).kind).toBe("bad");
-    expect(hitRateBadge(50).kind).toBe("bad");
+  it("hitRateBadge thresholds: ≤2 smooth, ≤10 workable, ≤50 painful, >50 unusable", () => {
+    expect(hitRateBadge(0).kind).toBe("smooth");
+    expect(hitRateBadge(2).kind).toBe("smooth");
+    expect(hitRateBadge(2.01).kind).toBe("workable");
+    expect(hitRateBadge(10).kind).toBe("workable");
+    expect(hitRateBadge(10.01).kind).toBe("painful");
+    expect(hitRateBadge(50).kind).toBe("painful");
+    expect(hitRateBadge(50.01).kind).toBe("unusable");
+    expect(hitRateBadge(100).kind).toBe("unusable");
   });
 
-  it("counts windows over cap and computes median/max overflow", () => {
-    // Three windows (one per day, >5h apart). Totals: 50k, 100k, 200k.
+  it("counts windows whose message count exceeds the plan cap (cache-reads ignored)", () => {
+    // Build three windows with 5, 50, and 500 messages. Put each in its
+    // own day so the 5h reset-on-expiry rule yields one window per set.
+    const makeBurst = (base: string, count: number) => {
+      const out: ScanEvent[] = [];
+      for (let i = 0; i < count; i++) {
+        // Space events 10s apart — all comfortably inside a single 5h window.
+        const sec = String(i * 10).padStart(4, "0");
+        out.push(mk(`${base}T09:00:${sec.slice(0,2)}.${sec.slice(2,4)}0Z`));
+      }
+      return out;
+    };
     const events = [
-      mk("2026-03-10T09:00:00Z", 50000),
-      mk("2026-03-11T09:00:00Z", 100000),
-      mk("2026-03-12T09:00:00Z", 200000),
+      ...makeBurst("2026-03-10", 5),
+      ...makeBurst("2026-03-11", 50),
+      ...makeBurst("2026-03-12", 500),
     ];
     const windows = compute5hWindows(events);
     expect(windows).toHaveLength(3);
+    expect(windows.map(w => w.eventCount)).toEqual([5, 50, 500]);
 
     const planLimits = {
-      "claude-pro":   { label: "Claude Pro",   monthlyUsd: 20,  messagesPer5h: [10, 45] as [number, number], tokensPer5h: 44000 },
-      "claude-max-5": { label: "Claude Max 5", monthlyUsd: 100, messagesPer5h: [225, null] as [number, null], tokensPer5h: 88000 },
-      "claude-max-20":{ label: "Claude Max 20",monthlyUsd: 200, messagesPer5h: [900, null] as [number, null], tokensPer5h: 220000 },
-      // No tokensPer5h → should be skipped entirely.
-      "openai-plus":  { label: "OpenAI Plus",  monthlyUsd: 20,  messagesPer5h: [10, 60] as [number, number] },
+      "claude-pro":   { label: "Claude Pro",   monthlyUsd: 20,  messagesPer5h: [10, 45]    as [number, number] },
+      "claude-max-5": { label: "Claude Max 5", monthlyUsd: 100, messagesPer5h: [225, null] as [number, null]   },
+      "claude-max-20":{ label: "Claude Max 20",monthlyUsd: 200, messagesPer5h: [900, null] as [number, null]   },
+      "enterprise":   { label: "Enterprise",   monthlyUsd: null, messagesPer5h: null }, // unlimited → skipped
     };
     const sim = simulateDowngrade(windows, planLimits);
-    // openai-plus has no tokensPer5h, so it's absent from the rows.
+
+    // Unlimited plans (messagesPer5h: null) are absent from the output.
     expect(sim.rows.map(r => r.key)).toEqual(["claude-pro", "claude-max-5", "claude-max-20"]);
 
     const pro = sim.rows.find(r => r.key === "claude-pro")!;
-    expect(pro.hitCount).toBe(3);  // all three windows exceed 44k
-    expect(pro.hitPct).toBeCloseTo(100);
-    expect(pro.verdict.kind).toBe("bad");
-    // Overflows: 6k, 56k, 156k → median = 56k, max = 156k
-    expect(pro.medianOverflow).toBe(56000);
-    expect(pro.maxOverflow).toBe(156000);
+    expect(pro.msgsPer5h).toBe(45);                 // hi bound of [10, 45]
+    expect(pro.hitCount).toBe(2);                   // 50 and 500 exceed 45
+    expect(pro.hitPct).toBeCloseTo(66.67, 1);
+    expect(pro.verdict.kind).toBe("unusable");      // >50%
 
     const max5 = sim.rows.find(r => r.key === "claude-max-5")!;
-    expect(max5.hitCount).toBe(2); // 100k and 200k exceed 88k
-    expect(max5.verdict.kind).toBe("bad");
+    expect(max5.msgsPer5h).toBe(225);               // "lo+" baseline uses lo
+    expect(max5.hitCount).toBe(1);                  // only 500 exceeds 225
+    expect(max5.verdict.kind).toBe("painful");      // 33% falls in 10-50
 
     const max20 = sim.rows.find(r => r.key === "claude-max-20")!;
-    expect(max20.hitCount).toBe(0); // none exceed 220k
-    expect(max20.verdict.kind).toBe("good");
-    expect(max20.medianOverflow).toBe(0);
-    expect(max20.maxOverflow).toBe(0);
+    expect(max20.msgsPer5h).toBe(900);
+    expect(max20.hitCount).toBe(0);
+    expect(max20.verdict.kind).toBe("smooth");
+
+    // Summary metrics: avg = (5+50+500)/3 ≈ 185, peak = 500.
+    expect(sim.peakMsgsPerWindow).toBe(500);
+    expect(Math.round(sim.avgMsgsPerWindow)).toBe(185);
   });
 
-  it("returns empty rows for empty windows (no divide-by-zero)", () => {
+  it("returns zero counts for empty windows with no divide-by-zero", () => {
     const planLimits = {
-      "claude-pro": { label: "Claude Pro", monthlyUsd: 20, messagesPer5h: [10, 45] as [number, number], tokensPer5h: 44000 },
+      "claude-pro": { label: "Claude Pro", monthlyUsd: 20, messagesPer5h: [10, 45] as [number, number] },
     };
     const sim = simulateDowngrade([], planLimits);
     expect(sim.totalWindows).toBe(0);
+    expect(sim.avgMsgsPerWindow).toBe(0);
+    expect(sim.peakMsgsPerWindow).toBe(0);
     expect(sim.rows).toHaveLength(1);
     expect(sim.rows[0].hitCount).toBe(0);
     expect(sim.rows[0].hitPct).toBe(0);
-    expect(sim.rows[0].verdict.kind).toBe("good");
+    expect(sim.rows[0].verdict.kind).toBe("smooth");
   });
 });
