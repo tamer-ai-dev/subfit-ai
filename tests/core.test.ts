@@ -227,10 +227,11 @@ describe("sortEvents", () => {
 });
 
 describe("compute5hWindows", () => {
-  const mk = (ts: string, inTok: number, outTok: number): ScanEvent => ({
+  const mk = (ts: string, inTok: number, outTok: number, requestId?: string): ScanEvent => ({
     ts, inputTokens: inTok, outputTokens: outTok,
     cacheReadTokens: 0, cacheCreationTokens: 0,
     provider: "claude", model: "claude-opus-4",
+    requestId,
   });
 
   it("returns [] for empty input", () => {
@@ -248,6 +249,7 @@ describe("compute5hWindows", () => {
     expect(w[0].startTs).toBe("2026-03-10T09:00:00Z");
     expect(w[0].endTs).toBe("2026-03-10T14:00:00.000Z"); // toISOString always emits .000Z
     expect(w[0].eventCount).toBe(3);
+    expect(w[0].messageCount).toBe(3); // no requestIds → fallback is 1 per event
     expect(w[0].inputTokens).toBe(3500);
     expect(w[0].outputTokens).toBe(700);
     expect(w[0].totalTokens).toBe(4200);
@@ -283,6 +285,68 @@ describe("compute5hWindows", () => {
     expect(w[0].inputTokens).toBe(800);
     // Input array is not mutated — callers pass raw ctx.events freely.
     expect(events[0].ts).toBe("2026-03-10T13:00:00Z");
+  });
+
+  it("dedups events sharing a requestId into one message", () => {
+    // One API call streamed as 3 content-block lines (all share req-1),
+    // then a second API call (req-2) with 1 line. 4 events, 2 messages.
+    const events = [
+      mk("2026-03-10T09:00:00Z", 100, 0, "req-1"),
+      mk("2026-03-10T09:00:01Z", 0,   0, "req-1"),
+      mk("2026-03-10T09:00:02Z", 0,   50, "req-1"),
+      mk("2026-03-10T09:05:00Z", 200, 0, "req-2"),
+    ];
+    const w = compute5hWindows(events);
+    expect(w).toHaveLength(1);
+    expect(w[0].eventCount).toBe(4);
+    expect(w[0].messageCount).toBe(2); // deduped
+  });
+
+  it("counts events without a requestId as 1 message each (non-Claude providers)", () => {
+    const events = [
+      mk("2026-03-10T09:00:00Z", 10, 0),  // undefined requestId
+      mk("2026-03-10T09:30:00Z", 20, 0),
+      mk("2026-03-10T10:00:00Z", 30, 0),
+    ];
+    const w = compute5hWindows(events);
+    expect(w).toHaveLength(1);
+    expect(w[0].eventCount).toBe(3);
+    expect(w[0].messageCount).toBe(3);
+  });
+
+  it("handles a mixed window: some events share a requestId, others have none", () => {
+    const events = [
+      // API call 1: 3 streamed lines share req-1
+      mk("2026-03-10T09:00:00Z", 100, 0, "req-1"),
+      mk("2026-03-10T09:00:01Z", 0,   50, "req-1"),
+      mk("2026-03-10T09:00:02Z", 0,   10, "req-1"),
+      // API call 2: single line, req-2
+      mk("2026-03-10T09:10:00Z", 50, 0, "req-2"),
+      // Non-Claude provider event without requestId
+      mk("2026-03-10T09:15:00Z", 10, 10),
+      // Another non-Claude event, also no requestId
+      mk("2026-03-10T09:20:00Z", 5,  5),
+    ];
+    const w = compute5hWindows(events);
+    expect(w).toHaveLength(1);
+    expect(w[0].eventCount).toBe(6);
+    // 1 (req-1) + 1 (req-2) + 1 + 1 (missing requestIds each count as 1) = 4
+    expect(w[0].messageCount).toBe(4);
+  });
+
+  it("requestId dedup is per-window: same requestId in two windows counts twice", () => {
+    // Two windows >5h apart. If for some reason the same requestId
+    // appeared in both (shouldn't happen in practice, but let's be
+    // explicit), each window should count it once.
+    const events = [
+      mk("2026-03-10T09:00:00Z", 100, 0, "req-1"),
+      mk("2026-03-10T09:00:01Z", 0,   50, "req-1"),
+      mk("2026-03-10T20:00:00Z", 100, 0, "req-1"), // 11h later → new window
+    ];
+    const w = compute5hWindows(events);
+    expect(w).toHaveLength(2);
+    expect(w[0].messageCount).toBe(1);
+    expect(w[1].messageCount).toBe(1);
   });
 });
 

@@ -424,6 +424,13 @@ export interface ScanEvent {
   provider: "claude" | "gemini" | "vibe" | "codex" | "opencode";
   /** Normalised pricing key (same key as ScanContext.byModel). */
   model: string;
+  /** Anthropic API request id when present (Claude JSONL's `requestId`
+   *  field). Claude Code writes one JSONL line per streamed content
+   *  block, so a single API response can produce several events that
+   *  share a requestId — the windowing layer dedups on this to match
+   *  Anthropic's per-request rate-limit accounting. Undefined for
+   *  providers that don't emit it (Gemini/Vibe/Codex/OpenCode). */
+  requestId?: string;
 }
 
 interface ScanContext {
@@ -578,10 +585,11 @@ function scanJsonl(filePath: string, ctx: ScanContext): void {
     const outTok  = u.output_tokens ?? 0;
     const crTok   = u.cache_read_input_tokens ?? 0;
     const cwTok   = u.cache_creation_input_tokens ?? 0;
+    const reqId   = typeof obj.requestId === "string" ? obj.requestId : undefined;
     if (ts) ctx.events.push({
       ts, inputTokens: inTok, outputTokens: outTok,
       cacheReadTokens: crTok, cacheCreationTokens: cwTok,
-      provider: "claude", model,
+      provider: "claude", model, requestId: reqId,
     });
 
     const addInto = (t: ModelTotals) => {
@@ -1626,18 +1634,30 @@ export interface WindowBucket {
   startTs: string;
   /** ISO timestamp of 5h after startTs (window close). */
   endTs: string;
-  /** Number of events folded into this window. */
+  /** Raw number of ScanEvent records folded into this window. Claude
+   *  Code writes one JSONL line per streamed content block, so this
+   *  over-counts API calls by ~1.7× on tool-use-heavy workloads. Use
+   *  messageCount for rate-limit comparisons. */
   eventCount: number;
+  /** Distinct API-call count for this window. Events sharing a
+   *  requestId collapse to one; events without a requestId (non-Claude
+   *  providers) count 1 each. This is the quantity compared against
+   *  plan `messagesPer5h` caps. */
+  messageCount: number;
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
   cacheCreationTokens: number;
-  /** input + output. The quantity compared against plan `tokensPer5h`. */
+  /** input + output. Retained for diagnostic purposes — not used by
+   *  the message-count-based plan simulation. */
   totalTokens: number;
 }
 
-/** Bucket events into reset-on-expiry 5h windows. Input does not need to
- *  be sorted — we sort a copy here so callers can pass raw ctx.events. */
+/** Bucket events into reset-on-expiry 5h windows. Input does not need
+ *  to be sorted — we sort a copy here so callers can pass raw
+ *  ctx.events. Per-window `messageCount` dedups events by requestId so
+ *  streamed content-block lines collapse to one API call; events with
+ *  no requestId each count as one. */
 export function compute5hWindows(events: ScanEvent[]): WindowBucket[] {
   if (events.length === 0) return [];
   const sorted = events.slice();
@@ -1646,18 +1666,19 @@ export function compute5hWindows(events: ScanEvent[]): WindowBucket[] {
   const windows: WindowBucket[] = [];
   let cur: WindowBucket | null = null;
   let curStartMs = 0;
+  let curSeenReqIds: Set<string> | null = null;
 
   for (const ev of sorted) {
     const t = new Date(ev.ts).getTime();
     if (isNaN(t)) continue;
     if (cur === null || t - curStartMs >= WINDOW_MS) {
-      // Previous window (if any) is already sealed; open a new one on
-      // this event's timestamp.
       curStartMs = t;
+      curSeenReqIds = new Set();
       cur = {
         startTs: ev.ts,
         endTs: new Date(t + WINDOW_MS).toISOString(),
         eventCount: 0,
+        messageCount: 0,
         inputTokens: 0, outputTokens: 0,
         cacheReadTokens: 0, cacheCreationTokens: 0,
         totalTokens: 0,
@@ -1665,6 +1686,14 @@ export function compute5hWindows(events: ScanEvent[]): WindowBucket[] {
       windows.push(cur);
     }
     cur.eventCount++;
+    if (ev.requestId) {
+      if (!curSeenReqIds!.has(ev.requestId)) {
+        curSeenReqIds!.add(ev.requestId);
+        cur.messageCount++;
+      }
+    } else {
+      cur.messageCount++;
+    }
     cur.inputTokens        += ev.inputTokens;
     cur.outputTokens       += ev.outputTokens;
     cur.cacheReadTokens    += ev.cacheReadTokens;
@@ -1731,7 +1760,7 @@ export function simulateDowngrade(
     if (cap == null || cap <= 0) continue;
     let hitCount = 0;
     for (const w of windows) {
-      if (w.eventCount > cap) hitCount++;
+      if (w.messageCount > cap) hitCount++;
     }
     const hitPct = windows.length === 0 ? 0 : (hitCount / windows.length) * 100;
     rows.push({
@@ -1747,8 +1776,8 @@ export function simulateDowngrade(
 
   let totalMsgs = 0, peak = 0;
   for (const w of windows) {
-    totalMsgs += w.eventCount;
-    if (w.eventCount > peak) peak = w.eventCount;
+    totalMsgs += w.messageCount;
+    if (w.messageCount > peak) peak = w.messageCount;
   }
   const avgMsgsPerWindow = windows.length === 0 ? 0 : totalMsgs / windows.length;
 
