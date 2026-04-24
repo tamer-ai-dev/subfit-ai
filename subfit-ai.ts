@@ -1736,19 +1736,26 @@ export function compute5hWindows(events: ScanEvent[]): WindowBucket[] {
   return windows;
 }
 
-/** Verdict for a downgrade simulation hit-rate.
- *   0-2%    → "smooth"   (rare throttling, safe to downgrade)
- *   2-10%   → "workable" (occasional throttling, tolerable)
- *   10-50%  → "painful"  (frequent throttling)
- *   >50%    → "unusable" (you would hit the cap in the majority of active windows)
+/** Verdict for a downgrade simulation hit-rate. Six-level scale so
+ *  we can distinguish "you'd barely notice" (smooth) from "you'd grit
+ *  your teeth" (frustrating) from "you'd rage-quit" (unusable).
+ *
+ *   ≤1%     → "smooth"       (effectively never throttled)
+ *   1-5%    → "comfortable"  (occasional hiccup)
+ *   5-15%   → "workable"     (tolerable, still functional)
+ *   15-35%  → "painful"      (frequent throttling during active work)
+ *   35-60%  → "frustrating"  (majority of active bursts near the line)
+ *   >60%    → "unusable"     (most active windows hit the cap)
  */
-export type HitRateKind = "smooth" | "workable" | "painful" | "unusable";
+export type HitRateKind = "smooth" | "comfortable" | "workable" | "painful" | "frustrating" | "unusable";
 
 export function hitRateBadge(hitPct: number): { kind: HitRateKind; badge: string } {
-  if (hitPct <= 2)  return { kind: "smooth",   badge: "smooth"   };
-  if (hitPct <= 10) return { kind: "workable", badge: "workable" };
-  if (hitPct <= 50) return { kind: "painful",  badge: "painful"  };
-  return                   { kind: "unusable", badge: "unusable" };
+  if (hitPct <= 1)  return { kind: "smooth",       badge: "smooth"       };
+  if (hitPct <= 5)  return { kind: "comfortable",  badge: "comfortable"  };
+  if (hitPct <= 15) return { kind: "workable",     badge: "workable"     };
+  if (hitPct <= 35) return { kind: "painful",      badge: "painful"      };
+  if (hitPct <= 60) return { kind: "frustrating",  badge: "frustrating"  };
+  return                   { kind: "unusable",     badge: "unusable"     };
 }
 
 /** Collapse a [lo, hi]-style messagesPer5h band into a single effective
@@ -1761,16 +1768,68 @@ export function effectiveMsgCap(range: [number, number | null] | null): number |
   return hi ?? lo;
 }
 
+/** Coarse provider family used to split the downgrade simulation into
+ *  "same provider" (pure downgrade ladder) vs "cross provider" (requires
+ *  workflow migration) views. "other" covers any plan whose key doesn't
+ *  match one of the known prefixes. */
+export type PlanFamily = "claude" | "openai" | "mistral" | "copilot" | "other";
+
+/** Map a plan key (e.g. "claude-max-20x", "copilot-pro") to a family.
+ *  Prefix-based so adding a new tier in the same family stays zero-config. */
+export function planFamilyOf(key: string): PlanFamily {
+  if (key.startsWith("claude-"))  return "claude";
+  if (key.startsWith("openai-"))  return "openai";
+  if (key.startsWith("mistral-")) return "mistral";
+  if (key.startsWith("copilot-")) return "copilot";
+  return "other";
+}
+
+/** Map a pricing-key (e.g. "claude-opus-4", "codex-standard", "devstral-2",
+ *  "gemini-pro") to the PLAN family the user is most likely subscribed
+ *  under. Gemini has no coding-subscription plan in config, so returns
+ *  "other" to signal "no same-provider section". */
+function usageFamilyFromPricingKey(pricingKey: string): PlanFamily {
+  if (pricingKey.startsWith("claude-"))   return "claude";
+  if (pricingKey.startsWith("codex-"))    return "openai";
+  if (pricingKey.startsWith("devstral-")) return "mistral";
+  return "other";
+}
+
+/** Detect the user's likely current plan family by counting priced
+ *  assistant messages per pricing family and picking the top one.
+ *  Returns "other" if the top family doesn't map to any subscription
+ *  family (e.g. a pure-Gemini user). */
+export function detectCurrentFamily(byModel: Map<string, ModelTotals>): PlanFamily {
+  const tallies = new Map<PlanFamily, number>();
+  for (const [k, t] of byModel) {
+    const fam = usageFamilyFromPricingKey(k);
+    tallies.set(fam, (tallies.get(fam) ?? 0) + t.messageCount);
+  }
+  let bestFam: PlanFamily = "other";
+  let bestCount = -1;
+  for (const [fam, count] of tallies) {
+    if (count > bestCount) { bestFam = fam; bestCount = count; }
+  }
+  return bestFam;
+}
+
 export interface DowngradeRow {
   key: string;
   label: string;
   monthlyUsd: number | null;
-  /** Effective cap applied: hi for fixed bands, lo for "lo+" baselines. */
-  msgsPer5h: number;
+  /** Plan's provider family (claude / openai / mistral / copilot). */
+  family: PlanFamily;
+  /** Effective 5h cap applied: hi for fixed bands, lo for "lo+"
+   *  baselines. null = plan has no 5h throttle (truly unlimited). */
+  msgsPer5h: number | null;
   totalWindows: number;
   hitCount: number;
   hitPct: number;
   verdict: { kind: HitRateKind; badge: string };
+  /** Plans whose 5h = null AND monthlyMsgCap is set are metered
+   *  monthly, not per-5h (Copilot). Callers should surface a
+   *  "see monthly table" placeholder instead of a numeric verdict. */
+  monthlyMetered: boolean;
 }
 
 export interface DowngradeSimulation {
@@ -1789,18 +1848,27 @@ export function simulateDowngrade(
   const rows: DowngradeRow[] = [];
   for (const [key, plan] of Object.entries(planLimits)) {
     const cap = effectiveMsgCap(plan.messagesPer5h);
-    if (cap == null || cap <= 0) continue;
+    const family = planFamilyOf(key);
+    const monthlyMetered = cap == null && plan.monthlyMsgCap != null;
     let hitCount = 0;
-    for (const w of windows) {
-      if (w.messageCount > cap) hitCount++;
+    if (cap != null && cap > 0) {
+      for (const w of windows) {
+        if (w.messageCount > cap) hitCount++;
+      }
     }
+    // Truly-unlimited plans (null cap, no monthly sub) report 0/N.
+    // Monthly-metered plans (Copilot) also report 0 here but are
+    // tagged so the renderer can show a cross-reference to the
+    // monthly table instead of a misleading "smooth".
     const hitPct = windows.length === 0 ? 0 : (hitCount / windows.length) * 100;
     rows.push({
       key, label: plan.label, monthlyUsd: plan.monthlyUsd,
+      family,
       msgsPer5h: cap,
       totalWindows: windows.length,
       hitCount, hitPct,
       verdict: hitRateBadge(hitPct),
+      monthlyMetered,
     });
   }
   // Cheapest plans first — users read downgrade risk bottom-up.
@@ -1962,7 +2030,8 @@ function renderBestFit(rec: BestFitRecommendation): string {
 function renderSubscriptionSection(
   stats: SubscriptionStats,
   planLimits: Record<string, PlanLimits>,
-  monthlyBlockedKeys?: ReadonlySet<string>,
+  monthlyBlockedKeys: ReadonlySet<string> | undefined,
+  currentFamily: PlanFamily,
 ): string {
   if (stats.totalMessages === 0) return "No messages — subscription comparison skipped.\n";
 
@@ -1971,9 +2040,16 @@ function renderSubscriptionSection(
   out.push(`  ≈ ${stats.avgPerDay.toFixed(1)} msgs/day  ≈ ${stats.avgPer5h.toFixed(1)} msgs per 5h window`);
   out.push("");
 
+  // Plans that have no 5h cap AND a monthly cap (Copilot family) are
+  // filtered out of this table — showing them as "unlimited — fits"
+  // is misleading when they're actually monthly-metered. They appear
+  // in the dedicated monthly simulation section instead.
+  const displayedPlans = Object.entries(planLimits)
+    .filter(([, p]) => !(p.messagesPer5h == null && p.monthlyMsgCap != null));
+
   const header = ["Plan", "Price/mo", "5h limit", "Fits your avg?", "Note"];
   const body: string[][] = [];
-  for (const plan of Object.values(planLimits)) {
+  for (const [, plan] of displayedPlans) {
     body.push([
       plan.label,
       plan.monthlyUsd === null ? "custom" : `$${plan.monthlyUsd}`,
@@ -1986,7 +2062,33 @@ function renderSubscriptionSection(
   const sessionsWarn = stats.avgSessionsPerMonth > MAX_SESSIONS_PER_MONTH_CAP
     ? `  ⚠ EXCEEDS ${MAX_SESSIONS_PER_MONTH_CAP} sessions/mo cap on Claude Max plans`
     : "";
-  const bestLine = renderBestFit(findBestFit(stats, planLimits, monthlyBlockedKeys));
+
+  // Best-fit split: same-provider vs any-provider. Same-provider is
+  // computed by constraining findBestFit's planLimits input to the
+  // user's current family; any-provider uses the full set.
+  const samePlans = Object.fromEntries(
+    Object.entries(planLimits).filter(([k]) => planFamilyOf(k) === currentFamily),
+  );
+  const sameBest = currentFamily !== "other"
+    ? findBestFit(stats, samePlans, monthlyBlockedKeys)
+    : null;
+  const anyBest = findBestFit(stats, planLimits, monthlyBlockedKeys);
+
+  const bestLines: string[] = [];
+  const sameLine = sameBest && sameBest.primary
+    ? `→ Best fit (same provider, ${familyLabel(currentFamily)}): ${sameBest.primary.label} at ${priceStr(sameBest.primary.monthlyUsd)}`
+    : null;
+  const anyPrimaryKey = anyBest.primary?.key ?? null;
+  const samePrimaryKey = sameBest?.primary?.key ?? null;
+  if (sameLine) bestLines.push(sameLine);
+  if (anyPrimaryKey && anyPrimaryKey !== samePrimaryKey && anyBest.primary) {
+    bestLines.push(`→ Best fit (any provider, requires migration): ${anyBest.primary.label} at ${priceStr(anyBest.primary.monthlyUsd)}`);
+  }
+  if (bestLines.length === 0) {
+    // Fall back to the legacy single-line renderer when nothing matches
+    // (covers the "no plan fits" and cheaper-marginal-annotation cases).
+    bestLines.push(renderBestFit(anyBest));
+  }
 
   const parts: string[] = [];
   parts.push(out.join("\n"));
@@ -1995,19 +2097,40 @@ function renderSubscriptionSection(
   parts.push(sessionsLine);
   if (sessionsWarn) parts.push(sessionsWarn);
   parts.push("");
-  parts.push(bestLine);
-  // Volatility warning is now emitted AFTER the per-model / per-month
-  // tables in main() so the subscription → tables → warnings flow reads
-  // cleanly. See the terminal-output section of main().
+  parts.push(bestLines.join("\n"));
   return parts.join("\n") + "\n";
 }
 
-/** Render the 5h-window downgrade simulation table (message-based).
- *  Shown only when events are available. Empty string otherwise — the
- *  caller decides whether to print anything. `daysSpanned` is the full
- *  span of the scan (same number as the subscription-section header),
- *  surfaced here so users can sanity-check the window density. */
-function renderDowngradeSection(sim: DowngradeSimulation, daysSpanned: number): string {
+/** Pretty-print the plan family for section headers. */
+function familyLabel(fam: PlanFamily): string {
+  switch (fam) {
+    case "claude":  return "Claude";
+    case "openai":  return "OpenAI";
+    case "mistral": return "Mistral";
+    case "copilot": return "Copilot";
+    case "other":   return "other";
+  }
+}
+
+/** Pick the "anchor" plan: the priciest plan in the user's current
+ *  family that actually has a 5h cap AND a published price. We
+ *  interpret it as the user's likely current tier, then the downgrade
+ *  ladder lists every cheaper same-family plan's simulation row. */
+function findAnchorPlan(sim: DowngradeSimulation, family: PlanFamily): DowngradeRow | null {
+  const candidates = sim.rows.filter(r => r.family === family && r.msgsPer5h != null && r.monthlyUsd != null);
+  if (candidates.length === 0) return null;
+  return candidates.reduce((a, b) => ((a.monthlyUsd ?? 0) >= (b.monthlyUsd ?? 0) ? a : b));
+}
+
+/** Render the two-part 5h simulation:
+ *   1. Same-provider downgrade ladder (e.g. Claude Max 20x → Max 5x → Team → Pro).
+ *   2. Cross-provider comparison — other families framed as migration options.
+ *  Returns "" when there are no active windows. */
+function renderSplitDowngradeSection(
+  sim: DowngradeSimulation,
+  daysSpanned: number,
+  currentFamily: PlanFamily,
+): string {
   if (sim.totalWindows === 0 || sim.rows.length === 0) return "";
 
   const out: string[] = [];
@@ -2015,19 +2138,74 @@ function renderDowngradeSection(sim: DowngradeSimulation, daysSpanned: number): 
   out.push(`Avg messages per window: ${Math.round(sim.avgMsgsPerWindow).toLocaleString()} / Peak: ${sim.peakMsgsPerWindow.toLocaleString()}`);
   out.push("");
 
-  const header = ["Plan", "Price/mo", "Msg cap (5h)", "Windows over cap", "Hit %", "Verdict"];
-  const body: string[][] = [];
-  for (const r of sim.rows) {
-    body.push([
-      r.label,
-      r.monthlyUsd === null ? "custom" : `$${r.monthlyUsd}`,
-      r.msgsPer5h.toLocaleString(),
-      `${r.hitCount.toLocaleString()} / ${r.totalWindows.toLocaleString()}`,
-      `${r.hitPct.toFixed(1)}%`,
-      r.verdict.badge,
-    ]);
+  // ── Same-provider downgrade ladder ────────────────────────────────
+  const anchor = findAnchorPlan(sim, currentFamily);
+  if (anchor) {
+    out.push(`── 5h-window simulation: same-provider downgrade (${familyLabel(currentFamily)}) ──`);
+    out.push(`Starting from ${anchor.label} at ${priceStr(anchor.monthlyUsd)}. Simulating downgrade to cheaper ${familyLabel(currentFamily)} tiers:`);
+    const sameFamilyCheaper = sim.rows
+      .filter(r => r.family === currentFamily
+                && r.key !== anchor.key
+                && (r.monthlyUsd ?? Infinity) < (anchor.monthlyUsd ?? 0))
+      .sort((a, b) => (b.monthlyUsd ?? 0) - (a.monthlyUsd ?? 0)); // priciest-first as we step down
+    if (sameFamilyCheaper.length === 0) {
+      out.push(`  (no cheaper ${familyLabel(currentFamily)} tier is currently configured)`);
+    } else {
+      const header = ["Plan", "Price/mo", "Msg cap (5h)", "Windows over cap", "Hit %", "Verdict"];
+      const body: string[][] = [];
+      for (const r of sameFamilyCheaper) {
+        body.push([
+          r.label,
+          priceStr(r.monthlyUsd),
+          r.msgsPer5h == null ? "unlimited" : r.msgsPer5h.toLocaleString(),
+          `${r.hitCount.toLocaleString()} / ${r.totalWindows.toLocaleString()}`,
+          `${r.hitPct.toFixed(1)}%`,
+          r.verdict.badge,
+        ]);
+      }
+      out.push(renderTable(header, body).join("\n"));
+    }
+    out.push("");
   }
-  out.push(renderTable(header, body).join("\n"));
+
+  // ── Cross-provider comparison ─────────────────────────────────────
+  out.push("── 5h-window simulation: cross-provider comparison ──");
+  out.push("If you migrated your usage pattern to another provider (requires migration):");
+  const crossRows = sim.rows.filter(r => r.family !== currentFamily);
+  if (crossRows.length === 0) {
+    out.push("  (no other providers configured)");
+  } else {
+    // Priced plans first, descending by price so the biggest bill
+    // lands at the top. Custom/Enterprise priceless plans trail.
+    const priced = crossRows.filter(r => r.monthlyUsd != null)
+      .sort((a, b) => (b.monthlyUsd ?? 0) - (a.monthlyUsd ?? 0));
+    const unpriced = crossRows.filter(r => r.monthlyUsd == null);
+    const ordered = [...priced, ...unpriced];
+
+    const header = ["Plan", "Windows over cap", "Hit %", "Verdict", "Price/mo"];
+    const body: string[][] = [];
+    for (const r of ordered) {
+      let verdictCell: string;
+      let hitPctCell: string;
+      let overCapCell: string;
+      if (r.monthlyMetered) {
+        verdictCell = "N/A (monthly quota, see below)";
+        hitPctCell = "—";
+        overCapCell = "—";
+      } else if (r.msgsPer5h == null) {
+        verdictCell = `${r.verdict.badge} (unlimited)`;
+        hitPctCell = `${r.hitPct.toFixed(1)}%`;
+        overCapCell = `${r.hitCount.toLocaleString()} / ${r.totalWindows.toLocaleString()}`;
+      } else {
+        verdictCell = r.verdict.badge;
+        hitPctCell = `${r.hitPct.toFixed(1)}%`;
+        overCapCell = `${r.hitCount.toLocaleString()} / ${r.totalWindows.toLocaleString()}`;
+      }
+      body.push([r.label, overCapCell, hitPctCell, verdictCell, priceStr(r.monthlyUsd)]);
+    }
+    out.push(renderTable(header, body).join("\n"));
+  }
+
   return out.join("\n") + "\n";
 }
 
@@ -2530,9 +2708,15 @@ function main(): number {
   const monthlySim = simulateMonthlyQuota(monthBuckets, planLimits);
   const monthlyBlockedKeys = new Set(
     monthlySim.rows
-      .filter(r => r.verdict.kind === "painful" || r.verdict.kind === "unusable")
+      // Anything worse than "workable" (≤15% hit rate) on a monthly cap
+      // disqualifies the plan from the best-fit comfortable pool.
+      .filter(r => r.verdict.kind === "painful" || r.verdict.kind === "frustrating" || r.verdict.kind === "unusable")
       .map(r => r.key),
   );
+  // User's likely current plan family — used to split the 5h simulation
+  // into "same-provider downgrade ladder" vs "cross-provider migration"
+  // views, and to scope the same-provider best-fit line.
+  const currentFamily = detectCurrentFamily(ctx.byModel);
 
   const bestFit = findBestFit(subStats, planLimits, monthlyBlockedKeys);
   // `price` is an internal sort key (Infinity for Enterprise → null in JSON).
@@ -2629,15 +2813,14 @@ function main(): number {
   // Lead with the subscription verdict (the question users actually came for);
   // the per-model / per-month tables follow as supporting evidence.
   out.push("── Subscription comparison ──");
-  out.push(renderSubscriptionSection(subStats, planLimits, monthlyBlockedKeys));
-  const downgradeBlock = renderDowngradeSection(downgradeSim, subStats.daysSpanned);
+  out.push(renderSubscriptionSection(subStats, planLimits, monthlyBlockedKeys, currentFamily));
+  const downgradeBlock = renderSplitDowngradeSection(downgradeSim, subStats.daysSpanned, currentFamily);
   if (downgradeBlock) {
-    out.push("── 5h-window downgrade simulation (message-based) ──");
     out.push(downgradeBlock);
   }
   const monthlyBlock = renderMonthlySimSection(monthlySim);
   if (monthlyBlock) {
-    out.push("── Monthly quota simulation ──");
+    out.push("── Monthly premium-request simulation (GitHub Copilot only) ──");
     out.push(monthlyBlock);
   }
   out.push("── Per model ──");

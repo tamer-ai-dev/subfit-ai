@@ -12,6 +12,8 @@ import {
   hitRateBadge,
   groupEventsByMonth,
   simulateMonthlyQuota,
+  planFamilyOf,
+  detectCurrentFamily,
   type ScanEvent,
 } from "../subfit-ai.ts";
 
@@ -374,14 +376,18 @@ describe("simulateDowngrade + hitRateBadge", () => {
     provider: "claude", model: "claude-opus-4",
   });
 
-  it("hitRateBadge thresholds: ≤2 smooth, ≤10 workable, ≤50 painful, >50 unusable", () => {
+  it("hitRateBadge six-level thresholds (≤1/5/15/35/60/>60)", () => {
     expect(hitRateBadge(0).kind).toBe("smooth");
-    expect(hitRateBadge(2).kind).toBe("smooth");
-    expect(hitRateBadge(2.01).kind).toBe("workable");
-    expect(hitRateBadge(10).kind).toBe("workable");
-    expect(hitRateBadge(10.01).kind).toBe("painful");
-    expect(hitRateBadge(50).kind).toBe("painful");
-    expect(hitRateBadge(50.01).kind).toBe("unusable");
+    expect(hitRateBadge(1).kind).toBe("smooth");
+    expect(hitRateBadge(1.01).kind).toBe("comfortable");
+    expect(hitRateBadge(5).kind).toBe("comfortable");
+    expect(hitRateBadge(5.01).kind).toBe("workable");
+    expect(hitRateBadge(15).kind).toBe("workable");
+    expect(hitRateBadge(15.01).kind).toBe("painful");
+    expect(hitRateBadge(35).kind).toBe("painful");
+    expect(hitRateBadge(35.01).kind).toBe("frustrating");
+    expect(hitRateBadge(60).kind).toBe("frustrating");
+    expect(hitRateBadge(60.01).kind).toBe("unusable");
     expect(hitRateBadge(100).kind).toBe("unusable");
   });
 
@@ -407,31 +413,47 @@ describe("simulateDowngrade + hitRateBadge", () => {
     expect(windows.map(w => w.eventCount)).toEqual([5, 50, 500]);
 
     const planLimits = {
-      "claude-pro":   { label: "Claude Pro",   monthlyUsd: 20,  messagesPer5h: [10, 45]    as [number, number] },
-      "claude-max-5": { label: "Claude Max 5", monthlyUsd: 100, messagesPer5h: [225, null] as [number, null]   },
-      "claude-max-20":{ label: "Claude Max 20",monthlyUsd: 200, messagesPer5h: [900, null] as [number, null]   },
-      "enterprise":   { label: "Enterprise",   monthlyUsd: null, messagesPer5h: null }, // unlimited → skipped
+      "claude-pro":        { label: "Claude Pro",        monthlyUsd: 20,   messagesPer5h: [10, 45]    as [number, number] },
+      "claude-max-5":      { label: "Claude Max 5",      monthlyUsd: 100,  messagesPer5h: [225, null] as [number, null]   },
+      "claude-max-20":     { label: "Claude Max 20",     monthlyUsd: 200,  messagesPer5h: [900, null] as [number, null]   },
+      "claude-enterprise": { label: "Claude Enterprise", monthlyUsd: null, messagesPer5h: null                               }, // unlimited → included, 0 hits
+      // Copilot-style: null messagesPer5h + monthlyMsgCap set → monthlyMetered=true
+      "copilot-pro":       { label: "Copilot Pro",       monthlyUsd: 10,   messagesPer5h: null, monthlyMsgCap: 300 },
     };
     const sim = simulateDowngrade(windows, planLimits);
 
-    // Unlimited plans (messagesPer5h: null) are absent from the output.
-    expect(sim.rows.map(r => r.key)).toEqual(["claude-pro", "claude-max-5", "claude-max-20"]);
+    // All plans now appear (even null-cap ones), sorted by price.
+    expect(sim.rows.map(r => r.key).sort()).toEqual(
+      ["claude-enterprise", "claude-max-20", "claude-max-5", "claude-pro", "copilot-pro"],
+    );
 
     const pro = sim.rows.find(r => r.key === "claude-pro")!;
     expect(pro.msgsPer5h).toBe(45);                 // hi bound of [10, 45]
     expect(pro.hitCount).toBe(2);                   // 50 and 500 exceed 45
     expect(pro.hitPct).toBeCloseTo(66.67, 1);
-    expect(pro.verdict.kind).toBe("unusable");      // >50%
+    expect(pro.verdict.kind).toBe("unusable");      // >60%
+    expect(pro.family).toBe("claude");
 
     const max5 = sim.rows.find(r => r.key === "claude-max-5")!;
     expect(max5.msgsPer5h).toBe(225);               // "lo+" baseline uses lo
     expect(max5.hitCount).toBe(1);                  // only 500 exceeds 225
-    expect(max5.verdict.kind).toBe("painful");      // 33% falls in 10-50
+    expect(max5.verdict.kind).toBe("painful");      // 33% falls in 15-35
 
     const max20 = sim.rows.find(r => r.key === "claude-max-20")!;
     expect(max20.msgsPer5h).toBe(900);
     expect(max20.hitCount).toBe(0);
     expect(max20.verdict.kind).toBe("smooth");
+
+    const ent = sim.rows.find(r => r.key === "claude-enterprise")!;
+    expect(ent.msgsPer5h).toBeNull();               // truly unlimited
+    expect(ent.hitCount).toBe(0);
+    expect(ent.verdict.kind).toBe("smooth");
+    expect(ent.monthlyMetered).toBe(false);
+
+    const copilot = sim.rows.find(r => r.key === "copilot-pro")!;
+    expect(copilot.msgsPer5h).toBeNull();
+    expect(copilot.monthlyMetered).toBe(true);      // 5h=null + monthlyMsgCap set
+    expect(copilot.family).toBe("copilot");
 
     // Summary metrics: avg = (5+50+500)/3 ≈ 185, peak = 500.
     expect(sim.peakMsgsPerWindow).toBe(500);
@@ -536,16 +558,16 @@ describe("groupEventsByMonth + simulateMonthlyQuota", () => {
     const free = sim.rows.find(r => r.key === "copilot-free")!;
     expect(free.hitCount).toBe(1);          // only 3500 exceeds 2000
     expect(free.hitPct).toBeCloseTo(25);
-    expect(free.verdict.kind).toBe("painful"); // 25% → painful
+    expect(free.verdict.kind).toBe("painful"); // 25% falls in 15-35 (painful)
 
     const pro = sim.rows.find(r => r.key === "copilot-pro")!;
     expect(pro.hitCount).toBe(3);           // 600, 1500, 3500 exceed 500
     expect(pro.hitPct).toBe(75);
-    expect(pro.verdict.kind).toBe("unusable"); // >50%
+    expect(pro.verdict.kind).toBe("unusable"); // >60%
 
     const biz = sim.rows.find(r => r.key === "copilot-business")!;
     expect(biz.hitCount).toBe(2);           // 1500 and 3500 exceed 1000
-    expect(biz.verdict.kind).toBe("painful"); // 50%
+    expect(biz.verdict.kind).toBe("frustrating"); // 50% falls in 35-60 (frustrating)
   });
 
   it("treats a partial month as one entry (hit % uses raw month count)", () => {
@@ -582,5 +604,48 @@ describe("groupEventsByMonth + simulateMonthlyQuota", () => {
       },
     });
     expect(sim.rows[0].monthlyCapUnit).toBe("premium req");
+  });
+});
+
+describe("planFamilyOf + detectCurrentFamily", () => {
+  it("maps plan keys to families by prefix", () => {
+    expect(planFamilyOf("claude-pro")).toBe("claude");
+    expect(planFamilyOf("claude-max-20x")).toBe("claude");
+    expect(planFamilyOf("openai-pro-20")).toBe("openai");
+    expect(planFamilyOf("mistral-pro")).toBe("mistral");
+    expect(planFamilyOf("copilot-enterprise")).toBe("copilot");
+    expect(planFamilyOf("unknown-thing")).toBe("other");
+  });
+
+  it("picks the top-message family from byModel tallies", () => {
+    const byModel = new Map([
+      ["claude-opus-4",  { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, messageCount: 500 }],
+      ["codex-standard", { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, messageCount: 100 }],
+      ["gemini-pro",     { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, messageCount:  50 }],
+    ]);
+    expect(detectCurrentFamily(byModel)).toBe("claude");
+  });
+
+  it("routes devstral to mistral, codex to openai, gemini to other", () => {
+    const devHeavy = new Map([
+      ["devstral-2", { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, messageCount: 200 }],
+    ]);
+    expect(detectCurrentFamily(devHeavy)).toBe("mistral");
+
+    const codexHeavy = new Map([
+      ["codex-standard", { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, messageCount: 200 }],
+    ]);
+    expect(detectCurrentFamily(codexHeavy)).toBe("openai");
+
+    const geminiOnly = new Map([
+      ["gemini-pro", { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, messageCount: 200 }],
+    ]);
+    // Gemini has no subscription family in config → "other" signals the
+    // renderer to skip the same-provider downgrade section.
+    expect(detectCurrentFamily(geminiOnly)).toBe("other");
+  });
+
+  it("returns 'other' when byModel is empty", () => {
+    expect(detectCurrentFamily(new Map())).toBe("other");
   });
 });
