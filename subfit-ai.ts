@@ -157,6 +157,12 @@ interface Args {
   /** Allow --export to overwrite an existing target. Without this flag the
    *  run aborts rather than silently clobber a report. */
   force: boolean;
+  /** Raw --from spec as given on the CLI (null when unset). Parsed and
+   *  validated in main() so parseArgs stays side-effect-free. Accepted
+   *  forms: relative ("3d" / "2w" / "6m"), shortcut ("today" / "lastweek"
+   *  / "thismonth" / ...), ISO date ("2026-04-01"), ISO range
+   *  ("2026-04-01..2026-04-15"). */
+  from: string | null;
 }
 
 /** Read `version` from package.json sitting next to the script. Returns "unknown"
@@ -172,6 +178,134 @@ function readVersion(): string {
 }
 
 const DEFAULT_EXPORT_PATH = "subfit-report.md";
+
+// ───────────────────────────────────────────────────────────────────────────
+// --from time-range parsing
+//
+// Accepts four syntaxes, all anchored to a reference "now":
+//   1. Relative      "3d" | "2w" | "6m"    (last N days/weeks/months, ending now)
+//   2. Shortcut      "today" | "yesterday" | "thisweek" | "lastweek"
+//                    | "thismonth" | "lastmonth"
+//   3. ISO date      "2026-04-01"          (from that date 00:00 through now)
+//   4. ISO range     "2026-04-01..2026-04-15"
+//
+// Returns { from, to } as Date objects. Throws on unparseable input so
+// callers can surface a clear error at CLI parse time instead of
+// silently accepting garbage.
+// ───────────────────────────────────────────────────────────────────────────
+
+export interface TimeRange {
+  from: Date;
+  to: Date;
+}
+
+/** Parse an ISO date-only string ("YYYY-MM-DD") into a UTC Date at
+ *  00:00:00. Returns null for anything else so callers can chain. */
+function parseIsoDay(s: string): Date | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
+  const d = new Date(`${s}T00:00:00Z`);
+  return isNaN(d.getTime()) ? null : d;
+}
+
+/** Start-of-UTC-day helper. */
+function startOfUtcDay(d: Date): Date {
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+}
+
+/** ISO week starts on Monday (UTC). Return the Monday 00:00 UTC
+ *  preceding (or equal to) the given date. */
+function startOfUtcWeek(d: Date): Date {
+  const day = startOfUtcDay(d);
+  const dow = day.getUTCDay();                // 0 = Sun, 1 = Mon, ...
+  const offset = dow === 0 ? 6 : dow - 1;     // Mon = 0 days back, Sun = 6
+  return new Date(day.getTime() - offset * 86_400_000);
+}
+
+/** Start of the UTC month containing d. */
+function startOfUtcMonth(d: Date): Date {
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1));
+}
+
+export function parseFromSpec(input: string, now: Date = new Date()): TimeRange {
+  const raw = input.trim();
+  if (!raw) throw new Error(`--from: empty value`);
+
+  // 4. ISO range "YYYY-MM-DD..YYYY-MM-DD"
+  if (raw.includes("..")) {
+    const [lo, hi] = raw.split("..", 2);
+    const from = parseIsoDay(lo);
+    const to   = parseIsoDay(hi);
+    if (!from || !to) {
+      throw new Error(`--from: "${input}" does not look like a valid YYYY-MM-DD..YYYY-MM-DD range`);
+    }
+    if (to.getTime() < from.getTime()) {
+      throw new Error(`--from: end date ${hi} precedes start date ${lo}`);
+    }
+    // Include the full "to" day: advance to next-day 00:00 exclusive.
+    return { from, to: new Date(to.getTime() + 86_400_000) };
+  }
+
+  // 3. Single ISO date
+  const maybeDay = parseIsoDay(raw);
+  if (maybeDay) return { from: maybeDay, to: now };
+
+  // 1. Relative "Nd" / "Nw" / "Nm"
+  const rel = /^(\d+)([dwm])$/i.exec(raw);
+  if (rel) {
+    const n = parseInt(rel[1], 10);
+    if (!(n > 0)) throw new Error(`--from: relative count must be positive, got "${input}"`);
+    const unit = rel[2].toLowerCase();
+    let msBack: number;
+    if (unit === "d") msBack = n * 86_400_000;
+    else if (unit === "w") msBack = n * 7 * 86_400_000;
+    else {
+      // Months: back up N calendar months from "now" (keeps same day-of-month
+      // when possible; JS Date handles the roll-back automatically).
+      const from = new Date(Date.UTC(
+        now.getUTCFullYear(), now.getUTCMonth() - n, now.getUTCDate(),
+        now.getUTCHours(), now.getUTCMinutes(), now.getUTCSeconds(),
+      ));
+      return { from, to: now };
+    }
+    return { from: new Date(now.getTime() - msBack), to: now };
+  }
+
+  // 2. Shortcuts
+  switch (raw.toLowerCase()) {
+    case "today":      return { from: startOfUtcDay(now), to: now };
+    case "yesterday": {
+      const todayStart = startOfUtcDay(now);
+      return { from: new Date(todayStart.getTime() - 86_400_000), to: todayStart };
+    }
+    case "thisweek":   return { from: startOfUtcWeek(now), to: now };
+    case "lastweek": {
+      const thisWeek = startOfUtcWeek(now);
+      return { from: new Date(thisWeek.getTime() - 7 * 86_400_000), to: thisWeek };
+    }
+    case "thismonth":  return { from: startOfUtcMonth(now), to: now };
+    case "lastmonth": {
+      const thisMonth = startOfUtcMonth(now);
+      const lastMonth = new Date(Date.UTC(thisMonth.getUTCFullYear(), thisMonth.getUTCMonth() - 1, 1));
+      return { from: lastMonth, to: thisMonth };
+    }
+  }
+
+  throw new Error(
+    `--from: unrecognised "${input}". Accepted: 3d | 2w | 6m | today | yesterday | thisweek | lastweek | thismonth | lastmonth | YYYY-MM-DD | YYYY-MM-DD..YYYY-MM-DD`,
+  );
+}
+
+/** Render a TimeRange for the banner: "2026-04-01 → 2026-04-15 (15 days)".
+ *  Day count = ceil((to - from) / 86_400_000) so a 24h range reads "1 day". */
+export function formatDateRange(r: TimeRange): string {
+  const fromDay = r.from.toISOString().slice(0, 10);
+  // Subtract one ms so a range like 2026-04-01..2026-04-01 (same day,
+  // expanded to the whole day internally) renders its end day correctly.
+  const toDay = new Date(r.to.getTime() - 1).toISOString().slice(0, 10);
+  const ms = r.to.getTime() - r.from.getTime();
+  const days = Math.max(1, Math.ceil(ms / 86_400_000));
+  return `${fromDay} → ${toDay} (${days} day${days === 1 ? "" : "s"})`;
+}
 
 function parseArgs(argv: string[]): Args {
   const args: Args = {
@@ -189,6 +323,7 @@ function parseArgs(argv: string[]): Args {
     demo: false,
     version: false,
     force: false,
+    from: null,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -218,6 +353,8 @@ function parseArgs(argv: string[]): Args {
       else args.exportPath = DEFAULT_EXPORT_PATH;
     }
     else if (a.startsWith("--export=")) args.exportPath = a.slice("--export=".length) || DEFAULT_EXPORT_PATH;
+    else if (a === "--from") args.from = argv[++i] ?? null;
+    else if (a.startsWith("--from=")) args.from = a.slice("--from=".length);
     else if (a.startsWith("-")) args.unknownFlags.push(a);
     else args.unknownFlags.push(a);
   }
@@ -264,6 +401,11 @@ OPTIONS
                   file unless --force is also passed. Can be combined with
                   normal terminal output.
   --force         Allow --export to overwrite an existing target file.
+  --from <range>  Filter events to a time window before computing anything.
+                  Accepts: 3d | 2w | 6m (relative); today | yesterday |
+                  thisweek | lastweek | thismonth | lastmonth (shortcuts);
+                  YYYY-MM-DD (from that date through now); or
+                  YYYY-MM-DD..YYYY-MM-DD (explicit range).
   --demo          Scan examples/sample.jsonl bundled with this script instead
                   of --path. Useful for trying the tool without Claude Code.
   -v, --version   Print the package version and exit.
@@ -566,6 +708,98 @@ function providerStatsOf(name: string, files: number, ctx: ScanContext): Provide
     minTs: ctx.minTs,
     maxTs: ctx.maxTs,
   };
+}
+
+/** Apply a time-range filter to an already-built ScanContext. Rebuilds
+ *  per-model / per-month aggregates, message count, and date bounds from
+ *  the filtered event stream; leaves counters that describe the raw
+ *  disk scan (totalLines, parseErrors, unknown model sets) untouched
+ *  because they describe ingest behaviour, not the filtered view.
+ *
+ *  `providerStats` is filtered in place: each provider's `messages` /
+ *  `withTokens` / date-range fields are recomputed from the events that
+ *  survived the filter and carry that provider tag. `files` / `entries`
+ *  / `parseErrors` stay at raw-scan values for the same reason.
+ */
+export function applyTimeFilter(
+  ctx: ScanContext,
+  providerStats: ProviderStats[],
+  range: TimeRange,
+): ProviderStats[] {
+  const fromIso = range.from.toISOString();
+  const toIso   = range.to.toISOString();
+  // ISO lexical compare works for same-precision timestamps; ScanEvent.ts
+  // comes from either an ISO string the provider wrote or new Date(...)
+  // .toISOString(), so they're always "YYYY-MM-DDTHH:MM:SS.sssZ".
+  const filtered = ctx.events.filter(e => e.ts >= fromIso && e.ts < toIso);
+
+  // Rebuild byModel + byMonth from filtered events.
+  const byModel = new Map<string, ModelTotals>();
+  const byMonth = new Map<string, Map<string, ModelTotals>>();
+  let minTs: string | null = null;
+  let maxTs: string | null = null;
+
+  for (const ev of filtered) {
+    const fold = (t: ModelTotals) => {
+      t.inputTokens        += ev.inputTokens;
+      t.outputTokens       += ev.outputTokens;
+      t.cacheReadTokens    += ev.cacheReadTokens;
+      t.cacheCreationTokens += ev.cacheCreationTokens;
+      t.messageCount++;
+    };
+    let mt = byModel.get(ev.model);
+    if (!mt) { mt = emptyTotals(); byModel.set(ev.model, mt); }
+    fold(mt);
+    const ym = yearMonth(ev.ts);
+    if (ym) {
+      let bucket = byMonth.get(ym);
+      if (!bucket) { bucket = new Map(); byMonth.set(ym, bucket); }
+      let mmt = bucket.get(ev.model);
+      if (!mmt) { mmt = emptyTotals(); bucket.set(ev.model, mmt); }
+      fold(mmt);
+    }
+    if (!minTs || ev.ts < minTs) minTs = ev.ts;
+    if (!maxTs || ev.ts > maxTs) maxTs = ev.ts;
+  }
+
+  ctx.events         = filtered;
+  ctx.byModel        = byModel;
+  ctx.byMonth        = byMonth;
+  ctx.withUsage      = filtered.length;
+  // assistantLines conceptually counts priced turns too once filtered;
+  // sync it so the Scan summary's "Messages" column matches the window.
+  ctx.assistantLines = filtered.length;
+  ctx.minTs          = minTs;
+  ctx.maxTs          = maxTs;
+
+  // Rebuild per-provider message counts + date range from filtered events.
+  const perProvider = new Map<string, { messages: number; withTokens: number; minTs: string | null; maxTs: string | null }>();
+  for (const ev of filtered) {
+    // ProviderStats.name is a human label ("Claude", "Gemini", ...), not
+    // the ScanEvent.provider key — build the lookup on the provider key
+    // then match by lowercase name.
+    let p = perProvider.get(ev.provider);
+    if (!p) { p = { messages: 0, withTokens: 0, minTs: null, maxTs: null }; perProvider.set(ev.provider, p); }
+    p.messages++;
+    p.withTokens++;
+    if (!p.minTs || ev.ts < p.minTs) p.minTs = ev.ts;
+    if (!p.maxTs || ev.ts > p.maxTs) p.maxTs = ev.ts;
+  }
+  return providerStats.map(ps => {
+    const key = ps.name.toLowerCase(); // e.g. "Claude" → "claude" matches event.provider
+    const rebuilt = perProvider.get(key);
+    if (!rebuilt) {
+      // No surviving events for this provider under the filter.
+      return { ...ps, messages: 0, withTokens: 0, minTs: null, maxTs: null };
+    }
+    return {
+      ...ps,
+      messages: rebuilt.messages,
+      withTokens: rebuilt.withTokens,
+      minTs: rebuilt.minTs,
+      maxTs: rebuilt.maxTs,
+    };
+  });
 }
 
 function scanJsonl(filePath: string, ctx: ScanContext): void {
@@ -2757,13 +2991,27 @@ function main(): number {
   // Leave stderr on a clean line so stdout (summary table) starts fresh.
   progressClear();
 
-  const providerStats: ProviderStats[] = [
+  let providerStats: ProviderStats[] = [
     providerStatsOf("Claude",   files.length,         ctxClaude),
     providerStatsOf("Gemini",   geminiFiles.length,   ctxGemini),
     providerStatsOf("Vibe",     vibeFiles.length,     ctxVibe),
     providerStatsOf("Codex",    codexFiles.length,    ctxCodex),
     providerStatsOf("OpenCode", opencodeFiles.length, ctxOpenCode),
   ];
+
+  // --from time-range filter. Runs BEFORE every downstream computation
+  // so subscription, 5h, and monthly sections all reflect the window.
+  let timeRangeBanner: string | null = null;
+  if (args.from != null) {
+    let range: TimeRange;
+    try { range = parseFromSpec(args.from); }
+    catch (err: any) {
+      process.stderr.write(`subfit-ai: ${err?.message ?? err}\n`);
+      return 2;
+    }
+    providerStats = applyTimeFilter(ctx, providerStats, range);
+    timeRangeBanner = `Analysing range: ${formatDateRange(range)}`;
+  }
 
   // Unknown-model warnings are collected here and emitted at the END of
   // the run (after tables on stdout are flushed) so the output reads
@@ -2866,6 +3114,7 @@ function main(): number {
       vibeSessionsScanned: vibeFiles.length,
       codexSessionsScanned: codexFiles.length,
       opencodeSessionsScanned: opencodeFiles.length,
+      timeRange: args.from ? { spec: args.from, banner: timeRangeBanner } : null,
       dateRange: { first: ctx.minTs, last: ctx.maxTs },
       stats: {
         totalLines: ctx.totalLines,
@@ -2928,6 +3177,7 @@ function main(): number {
   }
 
   const out: string[] = [];
+  if (timeRangeBanner) out.push(timeRangeBanner);
   out.push(renderScanSummary(providerStats, ctx, configSource));
   // Lead with the subscription verdict (the question users actually came for);
   // the per-model / per-month tables follow as supporting evidence.

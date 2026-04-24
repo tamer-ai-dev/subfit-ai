@@ -17,6 +17,8 @@ import {
   fmtPathForDisplay,
   pickBestFromSim,
   pickBudgetFromSim,
+  parseFromSpec,
+  formatDateRange,
   type ScanEvent,
 } from "../subfit-ai.ts";
 
@@ -733,5 +735,52 @@ describe("pickBestFromSim / pickBudgetFromSim", () => {
       mkRow("cheapest", 20, 5.0),
     ];
     expect(pickBudgetFromSim(rows, "cheapest", 20)).toBeNull();
+  });
+});
+
+describe("parseFromSpec + formatDateRange", () => {
+  // Anchor "now" to a fixed instant so the tests are deterministic.
+  const NOW = new Date("2026-04-24T12:00:00Z");
+
+  it("parses relative spec '3d' (last 3 days ending now)", () => {
+    const r = parseFromSpec("3d", NOW);
+    expect(r.to).toEqual(NOW);
+    expect(r.from.toISOString()).toBe("2026-04-21T12:00:00.000Z");
+  });
+
+  it("parses shortcut 'lastmonth' as the full previous calendar month UTC", () => {
+    const r = parseFromSpec("lastmonth", NOW);
+    expect(r.from.toISOString()).toBe("2026-03-01T00:00:00.000Z");
+    expect(r.to.toISOString()).toBe("2026-04-01T00:00:00.000Z");
+  });
+
+  it("parses a single ISO date as 'that day 00:00 → now'", () => {
+    const r = parseFromSpec("2026-04-01", NOW);
+    expect(r.from.toISOString()).toBe("2026-04-01T00:00:00.000Z");
+    expect(r.to).toEqual(NOW);
+  });
+
+  it("parses an ISO range and includes the full end day", () => {
+    const r = parseFromSpec("2026-04-01..2026-04-15", NOW);
+    expect(r.from.toISOString()).toBe("2026-04-01T00:00:00.000Z");
+    // Whole end day included → to = 2026-04-16 00:00 UTC (exclusive).
+    expect(r.to.toISOString()).toBe("2026-04-16T00:00:00.000Z");
+  });
+
+  it("throws on unrecognised input", () => {
+    expect(() => parseFromSpec("tomorrow", NOW)).toThrow(/unrecognised/);
+    expect(() => parseFromSpec("", NOW)).toThrow(/empty/);
+    expect(() => parseFromSpec("0d", NOW)).toThrow(/positive/);
+    expect(() => parseFromSpec("2026-05-01..2026-04-01", NOW)).toThrow(/precedes/);
+  });
+
+  it("formatDateRange renders a human-readable banner", () => {
+    const r = parseFromSpec("2026-04-01..2026-04-15", NOW);
+    expect(formatDateRange(r)).toBe("2026-04-01 → 2026-04-15 (15 days)");
+  });
+
+  it("formatDateRange uses '1 day' singular for a 24h range", () => {
+    const r = parseFromSpec("2026-04-01", new Date("2026-04-02T00:00:00Z"));
+    expect(formatDateRange(r)).toBe("2026-04-01 → 2026-04-01 (1 day)");
   });
 });
