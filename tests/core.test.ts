@@ -19,6 +19,7 @@ import {
   pickBudgetFromSim,
   parseFromSpec,
   formatDateRange,
+  computeHourlyDistribution,
   type ScanEvent,
 } from "../subfit-ai.ts";
 
@@ -782,5 +783,69 @@ describe("parseFromSpec + formatDateRange", () => {
   it("formatDateRange uses '1 day' singular for a 24h range", () => {
     const r = parseFromSpec("2026-04-01", new Date("2026-04-02T00:00:00Z"));
     expect(formatDateRange(r)).toBe("2026-04-01 → 2026-04-01 (1 day)");
+  });
+});
+
+describe("computeHourlyDistribution", () => {
+  const mk = (ts: string, requestId?: string, tokensIn = 10, tokensOut = 5): ScanEvent => ({
+    ts, inputTokens: tokensIn, outputTokens: tokensOut,
+    cacheReadTokens: 0, cacheCreationTokens: 0,
+    provider: "claude", model: "claude-opus-4",
+    requestId,
+  });
+
+  it("returns 24 rows even when input is empty (all zeroes)", () => {
+    const rows = computeHourlyDistribution([]);
+    expect(rows).toHaveLength(24);
+    expect(rows.every(r => r.messageCount === 0 && r.totalTokens === 0 && r.activeDates === 0)).toBe(true);
+    expect(rows.map(r => r.hour)).toEqual(Array.from({ length: 24 }, (_, i) => i));
+  });
+
+  it("attributes a single event to exactly one hour slot", () => {
+    const rows = computeHourlyDistribution([mk("2026-04-10T14:30:00Z", "r1", 100, 50)]);
+    expect(rows[14]).toMatchObject({
+      hour: 14, messageCount: 1, totalTokens: 150, activeDates: 1,
+    });
+    // Every other hour stays empty.
+    for (let h = 0; h < 24; h++) {
+      if (h === 14) continue;
+      expect(rows[h].messageCount).toBe(0);
+    }
+  });
+
+  it("dedups requestIds within the same hour, counts missing-id events individually", () => {
+    const rows = computeHourlyDistribution([
+      // 3 streamed lines sharing one requestId → 1 message.
+      mk("2026-04-10T09:00:00Z", "req-1"),
+      mk("2026-04-10T09:00:01Z", "req-1"),
+      mk("2026-04-10T09:00:02Z", "req-1"),
+      // A second API call in the same hour.
+      mk("2026-04-10T09:30:00Z", "req-2"),
+      // Events without a requestId (non-Claude providers) each count as 1.
+      mk("2026-04-10T09:45:00Z"),
+      mk("2026-04-10T09:50:00Z"),
+    ]);
+    expect(rows[9].messageCount).toBe(4); // 2 distinct requestIds + 2 missing-id events
+    expect(rows[9].activeDates).toBe(1);
+  });
+
+  it("activeDates counts distinct YYYY-MM-DD with ≥1 event at that hour", () => {
+    const rows = computeHourlyDistribution([
+      mk("2026-04-10T14:00:00Z", "a"),
+      mk("2026-04-11T14:00:00Z", "b"),
+      mk("2026-04-12T14:00:00Z", "c"),
+      mk("2026-04-12T14:30:00Z", "d"), // same date, doesn't inflate activeDates
+      mk("2026-04-10T09:00:00Z", "e"), // different hour → its own bucket
+    ]);
+    expect(rows[14].activeDates).toBe(3); // 10th, 11th, 12th
+    expect(rows[9].activeDates).toBe(1);  // only 10th
+  });
+
+  it("sums input+output tokens per hour (cache tokens NOT included)", () => {
+    const rows = computeHourlyDistribution([
+      mk("2026-04-10T09:00:00Z", "r1", 100, 200),
+      mk("2026-04-10T09:30:00Z", "r2", 50,  25),
+    ]);
+    expect(rows[9].totalTokens).toBe(375); // 100+200+50+25
   });
 });

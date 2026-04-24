@@ -163,6 +163,10 @@ interface Args {
    *  / "thismonth" / ...), ISO date ("2026-04-01"), ISO range
    *  ("2026-04-01..2026-04-15"). */
   from: string | null;
+  /** When true, append a 24-row hourly-distribution section at the end
+   *  of the terminal output. Composable with --from: the hourly table
+   *  aggregates only events inside the filter window. */
+  hourly: boolean;
 }
 
 /** Read `version` from package.json sitting next to the script. Returns "unknown"
@@ -324,6 +328,7 @@ function parseArgs(argv: string[]): Args {
     version: false,
     force: false,
     from: null,
+    hourly: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -355,6 +360,7 @@ function parseArgs(argv: string[]): Args {
     else if (a.startsWith("--export=")) args.exportPath = a.slice("--export=".length) || DEFAULT_EXPORT_PATH;
     else if (a === "--from") args.from = argv[++i] ?? null;
     else if (a.startsWith("--from=")) args.from = a.slice("--from=".length);
+    else if (a === "--hourly") args.hourly = true;
     else if (a.startsWith("-")) args.unknownFlags.push(a);
     else args.unknownFlags.push(a);
   }
@@ -406,6 +412,10 @@ OPTIONS
                   thisweek | lastweek | thismonth | lastmonth (shortcuts);
                   YYYY-MM-DD (from that date through now); or
                   YYYY-MM-DD..YYYY-MM-DD (explicit range).
+  --hourly        Append a 24-row hourly-distribution table after the
+                  monthly section. Composable with --from so e.g.
+                  --hourly --from lastmonth shows last month's
+                  hourly pattern.
   --demo          Scan examples/sample.jsonl bundled with this script instead
                   of --path. Useful for trying the tool without Claude Code.
   -v, --version   Print the package version and exit.
@@ -2253,6 +2263,139 @@ export function simulateMonthlyQuota(
   };
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// Hourly distribution (--hourly)
+//
+// Aggregate events across all days in scope, bucketed by UTC hour of
+// day. "Messages" dedups by requestId within each (date, hour) pair —
+// consistent with the 5h/monthly sims so numbers don't disagree. The
+// "Sessions" column counts distinct calendar dates with activity in
+// that hour (approximation: we don't track session IDs per event;
+// "dates-with-activity" is the closest useful proxy and matches the
+// "how often do I work at this hour" question people ask).
+// ───────────────────────────────────────────────────────────────────────────
+
+export interface HourlyRow {
+  hour: number;            // 0..23 (UTC)
+  messageCount: number;    // distinct requestIds in that hour across all in-range dates
+  totalTokens: number;     // input + output
+  activeDates: number;     // distinct YYYY-MM-DD with ≥1 event in that hour
+}
+
+/** Compute 24 hourly rows from an event stream. Rows are always in hour
+ *  order 0..23, including zero-activity hours (so the table width stays
+ *  fixed and the heatmap lines up visually). */
+export function computeHourlyDistribution(events: ScanEvent[]): HourlyRow[] {
+  // Per-hour accumulators. requestId dedup is scoped per-hour globally,
+  // not per (hour, date) — matching how rate-limit accounting treats
+  // the same API call as one message no matter where it lands.
+  const seenRequestIdsByHour: Map<number, Set<string>>  = new Map();
+  const missingCountByHour:   Map<number, number>       = new Map();
+  const tokensByHour:         Map<number, number>       = new Map();
+  const datesByHour:          Map<number, Set<string>>  = new Map();
+
+  for (const ev of events) {
+    const t = new Date(ev.ts);
+    if (isNaN(t.getTime())) continue;
+    const h = t.getUTCHours();
+    const date = ev.ts.slice(0, 10);
+
+    let dates = datesByHour.get(h);
+    if (!dates) { dates = new Set(); datesByHour.set(h, dates); }
+    dates.add(date);
+
+    tokensByHour.set(h, (tokensByHour.get(h) ?? 0) + ev.inputTokens + ev.outputTokens);
+
+    if (ev.requestId) {
+      let seen = seenRequestIdsByHour.get(h);
+      if (!seen) { seen = new Set(); seenRequestIdsByHour.set(h, seen); }
+      seen.add(ev.requestId);
+    } else {
+      missingCountByHour.set(h, (missingCountByHour.get(h) ?? 0) + 1);
+    }
+  }
+
+  const rows: HourlyRow[] = [];
+  for (let h = 0; h < 24; h++) {
+    rows.push({
+      hour: h,
+      messageCount: (seenRequestIdsByHour.get(h)?.size ?? 0) + (missingCountByHour.get(h) ?? 0),
+      totalTokens: tokensByHour.get(h) ?? 0,
+      activeDates: datesByHour.get(h)?.size ?? 0,
+    });
+  }
+  return rows;
+}
+
+/** Unicode block-character heatmap for a single row. Cell widths are
+ *  fixed at 8 (one cell per level ▁▂▃▄▅▆▇█) so rows align vertically
+ *  under fixed-width rendering. Zero-activity rows render as blanks. */
+function heatmapBar(value: number, max: number, width: number = 8): string {
+  if (max <= 0 || value <= 0) return " ".repeat(width);
+  const blocks = "▁▂▃▄▅▆▇█";
+  const ratio = value / max;
+  // Fill `full` cells entirely with the top block, then render a single
+  // partial-level cell based on the remainder. This produces a readable
+  // bar even at small widths.
+  const totalLevels = width * blocks.length;
+  const filled = Math.min(totalLevels, Math.max(0, Math.round(ratio * totalLevels)));
+  const full = Math.floor(filled / blocks.length);
+  const partialIdx = filled % blocks.length;
+  const bar = blocks[blocks.length - 1].repeat(full)
+            + (partialIdx > 0 ? blocks[partialIdx - 1] : "");
+  return bar.padEnd(width, " ");
+}
+
+function renderHourlySection(rows: HourlyRow[]): string {
+  if (rows.length === 0) return "";
+  const peakMsgs = rows.reduce((m, r) => Math.max(m, r.messageCount), 0);
+  if (peakMsgs === 0) return "";   // nothing to show
+
+  const out: string[] = [];
+  out.push("── Hourly distribution (UTC) ──");
+  const header = ["Hour", "Msgs", "Tokens", "Dates", "Heatmap"];
+  const body: string[][] = [];
+  for (const r of rows) {
+    body.push([
+      `${String(r.hour).padStart(2, "0")}:00`,
+      r.messageCount.toLocaleString(),
+      fmtTokens(r.totalTokens),
+      String(r.activeDates),
+      heatmapBar(r.messageCount, peakMsgs),
+    ]);
+  }
+  out.push(renderTable(header, body).join("\n"));
+
+  // Footer: peak hour + quiet streak. Quiet = hours whose messageCount
+  // is < 10% of the peak. Grouped into a concise range when contiguous.
+  const peakRow = rows.reduce((a, b) => (b.messageCount > a.messageCount ? b : a));
+  const quietThreshold = Math.ceil(peakMsgs * 0.1);
+  const quietHours = rows.filter(r => r.messageCount < quietThreshold).map(r => r.hour).sort((a, b) => a - b);
+  out.push("");
+  out.push(
+    `Peak hour: ${String(peakRow.hour).padStart(2, "0")}:00 (${peakRow.messageCount.toLocaleString()} msgs across ${peakRow.activeDates} date${peakRow.activeDates === 1 ? "" : "s"})`,
+  );
+  if (quietHours.length > 0) {
+    // Summarise contiguous quiet hours compactly (e.g. "02:00-07:00").
+    const ranges: string[] = [];
+    let start = quietHours[0];
+    let prev = start;
+    for (let i = 1; i < quietHours.length; i++) {
+      const h = quietHours[i];
+      if (h === prev + 1) { prev = h; continue; }
+      ranges.push(start === prev
+        ? `${String(start).padStart(2, "0")}:00`
+        : `${String(start).padStart(2, "0")}:00-${String(prev).padStart(2, "0")}:00`);
+      start = h; prev = h;
+    }
+    ranges.push(start === prev
+      ? `${String(start).padStart(2, "0")}:00`
+      : `${String(start).padStart(2, "0")}:00-${String(prev).padStart(2, "0")}:00`);
+    out.push(`Quiet hours (< ${quietThreshold} msgs): ${ranges.join(", ")}`);
+  }
+  return out.join("\n") + "\n";
+}
+
 function primaryReason(p: PlanStatus): string {
   if (p.verdict.startsWith("unlimited")) return "unlimited 5h throughput";
   if (p.verdict.startsWith("FITS at high-usage")) return "fits within high-usage band";
@@ -3135,6 +3278,7 @@ function main(): number {
       bestFit: bestFitPayload,
       downgradeSimulation: downgradeSim,
       monthlyQuotaSimulation: monthlySim,
+      hourlyDistribution: args.hourly ? computeHourlyDistribution(ctx.events) : null,
       byModel: rows,
       byMonth: Object.fromEntries(
         [...ctx.byMonth.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([ym, bucket]) => [
@@ -3191,6 +3335,11 @@ function main(): number {
   if (monthlyBlock) {
     out.push("── Monthly premium-request simulation (GitHub Copilot only) ──");
     out.push(monthlyBlock);
+  }
+  if (args.hourly) {
+    const hourlyRows = computeHourlyDistribution(ctx.events);
+    const hourlyBlock = renderHourlySection(hourlyRows);
+    if (hourlyBlock) out.push(hourlyBlock);
   }
   out.push("── Per model ──");
   out.push(renderModelSection(rows));
