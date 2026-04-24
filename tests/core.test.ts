@@ -143,6 +143,21 @@ describe("findBestFit", () => {
     expect(rec.primary).toBeNull();
     expect(rec.marginal).toBeNull();
   });
+
+  it("monthlyBlockedKeys disqualifies plans from 'comfortable' even when 5h verdict fits", () => {
+    // All plans have plenty of 5h headroom; copilot is "unlimited" (null).
+    // Without the blocked set, cheapest comfortable wins. With copilot
+    // flagged as monthly-blocked, it falls out of the pool.
+    const mixed = {
+      "copilot-pro": { label: "Copilot Pro", monthlyUsd: 10, messagesPer5h: null },
+      "claude-pro":  { label: "Claude Pro",  monthlyUsd: 20, messagesPer5h: [10, 45] as [number, number | null] },
+    };
+    const recOpen = findBestFit(stats(5), mixed);
+    expect(recOpen.primary?.key).toBe("copilot-pro"); // cheapest + "unlimited"
+
+    const recBlocked = findBestFit(stats(5), mixed, new Set(["copilot-pro"]));
+    expect(recBlocked.primary?.key).toBe("claude-pro");
+  });
 });
 
 describe("sanitizeForTerminal", () => {
@@ -553,5 +568,19 @@ describe("groupEventsByMonth + simulateMonthlyQuota", () => {
     expect(sim.rows[0].hitCount).toBe(1);
     expect(sim.rows[0].hitPct).toBe(100);
     expect(sim.rows[0].verdict.kind).toBe("unusable");
+    expect(sim.rows[0].monthlyCapUnit).toBe("msgs"); // default unit
+  });
+
+  it("passes through a custom monthlyCapUnit (e.g. Copilot 'premium req')", () => {
+    const events = [mk("2026-04-01T09:00:00Z", "r1")];
+    const months = groupEventsByMonth(events);
+    const sim = simulateMonthlyQuota(months, {
+      "copilot-pro": {
+        label: "Copilot Pro", monthlyUsd: 10,
+        messagesPer5h: null, monthlyMsgCap: 300,
+        monthlyCapUnit: "premium req",
+      },
+    });
+    expect(sim.rows[0].monthlyCapUnit).toBe("premium req");
   });
 });

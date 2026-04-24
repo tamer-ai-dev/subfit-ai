@@ -60,6 +60,12 @@ interface PlanLimits {
    *  sessions/tokens instead) omit this. Calendar-month aggregation
    *  dedups events by requestId — same accounting as the 5h sim. */
   monthlyMsgCap?: number | null;
+  /** Human-readable unit label for monthlyMsgCap (default "msgs").
+   *  Copilot tiers use "premium req" because their cap meters on
+   *  premium-request tokens, not Claude-style assistant messages —
+   *  the two units are NOT 1:1 and a disclaimer is printed whenever
+   *  any non-default unit appears. */
+  monthlyCapUnit?: string;
   /** Short note shown alongside verdict. */
   note?: string;
 }
@@ -1533,7 +1539,7 @@ function verdict5h(avg: number, range: [number, number | null] | null): string {
   return `FITS at high-usage tier (avg ${avg.toFixed(1)} within [${lo}-${hi}])`;
 }
 
-type PlanStatusKind = "comfortable" | "marginal" | "exceeds" | "session-blocked";
+type PlanStatusKind = "comfortable" | "marginal" | "exceeds" | "session-blocked" | "monthly-blocked";
 
 interface PlanStatus {
   key: string;
@@ -1547,7 +1553,11 @@ interface PlanStatus {
   price: number;
 }
 
-function classifyPlans(stats: SubscriptionStats, planLimits: Record<string, PlanLimits>): PlanStatus[] {
+function classifyPlans(
+  stats: SubscriptionStats,
+  planLimits: Record<string, PlanLimits>,
+  monthlyBlockedKeys?: ReadonlySet<string>,
+): PlanStatus[] {
   const out: PlanStatus[] = [];
   for (const [key, plan] of Object.entries(planLimits)) {
     const verdict = verdict5h(stats.avgPer5h, plan.messagesPer5h);
@@ -1555,6 +1565,12 @@ function classifyPlans(stats: SubscriptionStats, planLimits: Record<string, Plan
     let marginalPct: number | null = null;
     if (plan.sessionsCap != null && stats.avgSessionsPerMonth > plan.sessionsCap) {
       status = "session-blocked";
+    } else if (monthlyBlockedKeys?.has(key)) {
+      // Monthly-quota failures override the 5h verdict: a plan whose
+      // 5h picture is "unlimited" may still fail on monthly caps
+      // (e.g. Copilot tiers, which have no 5h throttling but tight
+      // monthly premium-request budgets).
+      status = "monthly-blocked";
     } else if (verdict.startsWith("EXCEEDS")) {
       status = "exceeds";
     } else if (verdict.startsWith("MARGINAL")) {
@@ -1587,9 +1603,20 @@ interface BestFitRecommendation {
 /** Pick the plan to recommend. MARGINAL does NOT count as FITS — we prefer a
  *  plan with real buffer. When only a marginal plan is reachable, surface both
  *  it and the next-up headroom option (or Enterprise) so the user sees the
- *  trade-off instead of a silently-tight recommendation. */
-function findBestFit(stats: SubscriptionStats, planLimits: Record<string, PlanLimits>): BestFitRecommendation {
-  const classified = classifyPlans(stats, planLimits);
+ *  trade-off instead of a silently-tight recommendation.
+ *
+ *  `monthlyBlockedKeys` — optional. Plan keys whose monthly-quota
+ *  simulation verdict is worse than "workable" (i.e. painful or
+ *  unusable). These plans are disqualified from the "comfortable"
+ *  bucket even when their 5h picture looks fine. Letting the
+ *  recommender suggest Copilot Free at $0 just because Copilot has no
+ *  5h cap was the behaviour this parameter closes. */
+function findBestFit(
+  stats: SubscriptionStats,
+  planLimits: Record<string, PlanLimits>,
+  monthlyBlockedKeys?: ReadonlySet<string>,
+): BestFitRecommendation {
+  const classified = classifyPlans(stats, planLimits, monthlyBlockedKeys);
   const comfortable = classified.filter(c => c.status === "comfortable").sort((a, b) => a.price - b.price);
   const marginal = classified.filter(c => c.status === "marginal").sort((a, b) => a.price - b.price);
 
@@ -1846,6 +1873,8 @@ export interface MonthlyRow {
   monthlyUsd: number | null;
   /** Published monthly message cap for this plan. */
   monthlyCap: number;
+  /** Unit label for the cap ("msgs" default, "premium req" for Copilot). */
+  monthlyCapUnit: string;
   totalMonths: number;
   hitCount: number;
   hitPct: number;
@@ -1879,6 +1908,7 @@ export function simulateMonthlyQuota(
     rows.push({
       key, label: plan.label, monthlyUsd: plan.monthlyUsd,
       monthlyCap: cap,
+      monthlyCapUnit: plan.monthlyCapUnit ?? "msgs",
       totalMonths: months.length,
       hitCount, hitPct,
       verdict: hitRateBadge(hitPct),
@@ -1929,7 +1959,11 @@ function renderBestFit(rec: BestFitRecommendation): string {
   return "→ No plan comfortably fits — consider Enterprise or reducing usage";
 }
 
-function renderSubscriptionSection(stats: SubscriptionStats, planLimits: Record<string, PlanLimits>): string {
+function renderSubscriptionSection(
+  stats: SubscriptionStats,
+  planLimits: Record<string, PlanLimits>,
+  monthlyBlockedKeys?: ReadonlySet<string>,
+): string {
   if (stats.totalMessages === 0) return "No messages — subscription comparison skipped.\n";
 
   const out: string[] = [];
@@ -1952,7 +1986,7 @@ function renderSubscriptionSection(stats: SubscriptionStats, planLimits: Record<
   const sessionsWarn = stats.avgSessionsPerMonth > MAX_SESSIONS_PER_MONTH_CAP
     ? `  ⚠ EXCEEDS ${MAX_SESSIONS_PER_MONTH_CAP} sessions/mo cap on Claude Max plans`
     : "";
-  const bestLine = renderBestFit(findBestFit(stats, planLimits));
+  const bestLine = renderBestFit(findBestFit(stats, planLimits, monthlyBlockedKeys));
 
   const parts: string[] = [];
   parts.push(out.join("\n"));
@@ -1998,7 +2032,10 @@ function renderDowngradeSection(sim: DowngradeSimulation, daysSpanned: number): 
 }
 
 /** Render the monthly-quota simulation table. Empty string when there
- *  are no months or no plans with monthly caps. */
+ *  are no months or no plans with monthly caps. Appends cross-plan
+ *  unit-mismatch disclaimers whenever a non-default unit (e.g.
+ *  "premium req") appears, because Copilot premium requests are not
+ *  1:1 comparable to Claude assistant messages. */
 function renderMonthlySimSection(sim: MonthlySimulation): string {
   if (sim.totalMonths === 0 || sim.rows.length === 0) return "";
 
@@ -2016,13 +2053,24 @@ function renderMonthlySimSection(sim: MonthlySimulation): string {
     body.push([
       r.label,
       r.monthlyUsd === null ? "custom" : `$${r.monthlyUsd}`,
-      `${r.monthlyCap.toLocaleString()} msgs`,
+      `${r.monthlyCap.toLocaleString()} ${r.monthlyCapUnit}`,
       `${r.hitCount.toLocaleString()} / ${r.totalMonths.toLocaleString()}`,
       `${r.hitPct.toFixed(1)}%`,
       r.verdict.badge,
     ]);
   }
   out.push(renderTable(header, body).join("\n"));
+
+  const hasNonMsgUnits = sim.rows.some(r => r.monthlyCapUnit !== "msgs");
+  if (hasNonMsgUnits) {
+    out.push("");
+    out.push("⚠ Copilot \"premium requests\" ≠ Claude \"messages\". A Copilot premium request");
+    out.push("  can cost 1x–20x depending on the model used (e.g. Claude Opus via Copilot");
+    out.push("  costs more than GPT-4.1). Direct comparison with Claude message counts is");
+    out.push("  approximate — no official conversion factor exists.");
+    out.push("⚠ Copilot's 2,000 completions/month (Free tier) are inline autocomplete,");
+    out.push("  not chat/agent requests. Only premium requests are comparable to Claude turns.");
+  }
   return out.join("\n") + "\n";
 }
 
@@ -2159,6 +2207,11 @@ interface MarkdownInput {
   providerStats: ProviderStats[];
   minTs: string | null;
   maxTs: string | null;
+  /** Plan keys disqualified by the monthly-quota simulation. Passed
+   *  through to findBestFit so the markdown recommendation agrees with
+   *  the terminal/JSON one. Optional — callers pre-dating the monthly
+   *  sim can omit it. */
+  monthlyBlockedKeys?: ReadonlySet<string>;
 }
 
 export function renderMarkdown(inp: MarkdownInput): string {
@@ -2267,7 +2320,7 @@ export function renderMarkdown(inp: MarkdownInput): string {
     out.push("> Community reports indicate they can deplete faster than expected on some");
     out.push("> workloads. If your avg is within 20% of a plan limit, expect occasional throttling.");
     out.push("");
-    const best = findBestFit(inp.subStats, inp.planLimits);
+    const best = findBestFit(inp.subStats, inp.planLimits, inp.monthlyBlockedKeys);
     out.push(`**${renderBestFit(best)}**`);
   }
   out.push("");
@@ -2468,7 +2521,20 @@ function main(): number {
       sessionCapExceeded: plan.sessionsCap != null && subStats.avgSessionsPerMonth > plan.sessionsCap,
     }]),
   );
-  const bestFit = findBestFit(subStats, planLimits);
+  // Compute the 5h and monthly simulations BEFORE findBestFit — the
+  // monthly verdict feeds into best-fit classification so a plan with
+  // no 5h cap (Copilot) but a tight monthly cap cannot be recommended.
+  const windows = compute5hWindows(ctx.events);
+  const downgradeSim = simulateDowngrade(windows, planLimits);
+  const monthBuckets = groupEventsByMonth(ctx.events);
+  const monthlySim = simulateMonthlyQuota(monthBuckets, planLimits);
+  const monthlyBlockedKeys = new Set(
+    monthlySim.rows
+      .filter(r => r.verdict.kind === "painful" || r.verdict.kind === "unusable")
+      .map(r => r.key),
+  );
+
+  const bestFit = findBestFit(subStats, planLimits, monthlyBlockedKeys);
   // `price` is an internal sort key (Infinity for Enterprise → null in JSON).
   // Strip it so machine consumers see a clean shape.
   const stripPrice = (p: PlanStatus | null) => {
@@ -2483,13 +2549,6 @@ function main(): number {
     marginal: stripPrice(bestFit.marginal),
     headroomAlt: stripPrice(bestFit.headroomAlt),
   };
-
-  // 5h-window downgrade simulation. Only runs when per-message events
-  // were retained AND at least one plan carries a `tokensPer5h` cap.
-  const windows = compute5hWindows(ctx.events);
-  const downgradeSim = simulateDowngrade(windows, planLimits);
-  const monthBuckets = groupEventsByMonth(ctx.events);
-  const monthlySim = simulateMonthlyQuota(monthBuckets, planLimits);
 
   if (args.json) {
     const payload = {
@@ -2553,6 +2612,7 @@ function main(): number {
           pricing, planLimits,
           providerStats,
           minTs: ctx.minTs, maxTs: ctx.maxTs,
+          monthlyBlockedKeys,
         });
         writeFileSync(target, md, "utf-8");
         process.stderr.write(`subfit-ai: report written to ${target}\n`);
@@ -2569,7 +2629,7 @@ function main(): number {
   // Lead with the subscription verdict (the question users actually came for);
   // the per-model / per-month tables follow as supporting evidence.
   out.push("── Subscription comparison ──");
-  out.push(renderSubscriptionSection(subStats, planLimits));
+  out.push(renderSubscriptionSection(subStats, planLimits, monthlyBlockedKeys));
   const downgradeBlock = renderDowngradeSection(downgradeSim, subStats.daysSpanned);
   if (downgradeBlock) {
     out.push("── 5h-window downgrade simulation (message-based) ──");
@@ -2615,6 +2675,7 @@ function main(): number {
         pricing, planLimits,
         providerStats,
         minTs: ctx.minTs, maxTs: ctx.maxTs,
+        monthlyBlockedKeys,
       });
       writeFileSync(target, md, "utf-8");
       process.stderr.write(`subfit-ai: report written to ${target}\n`);

@@ -130,6 +130,37 @@ blocked on the cap?"*
   not model them. (We tried briefly; the token caps we found were
   speculative and produced misleading results.)
 
+## Cross-plan comparisons: Copilot vs. Claude
+
+The downgrade / monthly-sim tables include GitHub Copilot tiers for
+completeness, but **Copilot's "premium request" unit is not 1:1
+comparable to a Claude assistant message**:
+
+- A single Copilot premium request can cost anywhere from **1×** (a
+  small GPT-4.1 call) to **20×** (a Claude Opus call routed via
+  Copilot). Anthropic's own message accounting is closer to 1:1 per
+  API call.
+- Copilot Free's "2,000 completions/month" is **inline autocomplete**,
+  not chat/agent requests. `subfit-ai` does NOT count those as
+  premium requests or Claude messages — the monthly sim uses the
+  **premium-request** quota only.
+- `messagesPer5h` is `null` for Copilot plans because GitHub does not
+  throttle per 5-hour window; the constraint is entirely monthly.
+
+The simulation therefore reports a rough floor for Copilot, not an
+apples-to-apples number. Treat Copilot rows as a sanity check ("would
+I instantly blow past the premium-request budget?"), not as a precise
+cost model.
+
+### Best-fit recommender
+
+`findBestFit` considers both the 5h verdict AND the monthly
+simulation. A plan whose monthly hit rate is `painful` (>10%) or
+`unusable` (>50%) is disqualified from the "comfortable" pool, even
+when its 5h verdict says "unlimited". This is why Copilot Free
+(messagesPer5h: null, unlimited 5h → looked like a free fit) stopped
+appearing as a recommendation once the monthly cap check was added.
+
 ## Updating the plan data
 
 Published 5h bands live in `planLimits` in `config.json`. When

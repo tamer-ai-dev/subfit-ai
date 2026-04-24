@@ -4,6 +4,8 @@
 [![Node](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)](./package.json)
 [![Tested with Claude Code](https://img.shields.io/badge/tested%20with-Claude%20Code-8A2BE2.svg)](https://claude.ai/code)
 
+> ⚠️ **Not for production use.** This tool is under active construction. Data, pricing estimates, and plan comparisons are approximate and may contain errors. Always verify against official provider documentation before making purchasing decisions.
+
 **find the plan that fits your usage.**
 
 ## What it does
