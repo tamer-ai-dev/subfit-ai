@@ -168,7 +168,22 @@ Anthropic updates their docs, edit the `[lo, hi]` or `[lo, null]`
 tuple, update the `_source` URL, and keep `config.json` and
 `default-config.json` byte-identical (CLAUDE.md rule #2).
 
-The `tokensPer5h` field is **not** supported — we removed it after
-finding the community estimates were unreliable and were modelling the
-wrong quantity (rate limits are per-request, not per-token). Do not
-add it back without authoritative data.
+### `tokensPer5h` (token-based simulation)
+
+Anthropic enforces Claude Code with **both** a message cap *and* a
+per-5h uncached-token budget — the progress bar in-CLI reads against
+the token budget, and community reverse-engineering (milvus.io /
+faros.ai) reports ≈44k tokens/5h on Pro, ≈88k on Max 5x, ≈220k on
+Max 20x. `subfit-ai` now renders a second downgrade section
+("5h-window simulation: token-based (community estimates)") driven by
+`plan.tokensPer5h`. The section uses `window.totalTokens`
+(input + output only; cache-read is excluded at the event layer), and
+each config entry cites `_tokensSource`.
+
+Earlier revisions of this page said **not** to re-add `tokensPer5h` —
+that guidance was correct at the time because the caps we had were
+unreliable. The current values are still estimates, not Anthropic-
+published, and should be treated as a secondary check alongside the
+authoritative message-count simulation. Update both when better data
+surfaces (and keep `config.json` / `default-config.json` byte-identical
+per CLAUDE.md rule #2).

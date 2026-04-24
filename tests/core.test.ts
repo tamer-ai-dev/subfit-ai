@@ -20,6 +20,7 @@ import {
   parseFromSpec,
   formatDateRange,
   computeHourlyDistribution,
+  simulateTokenDowngrade,
   type ScanEvent,
 } from "../subfit-ai.ts";
 
@@ -847,5 +848,78 @@ describe("computeHourlyDistribution", () => {
       mk("2026-04-10T09:30:00Z", "r2", 50,  25),
     ]);
     expect(rows[9].totalTokens).toBe(375); // 100+200+50+25
+  });
+});
+
+describe("simulateTokenDowngrade", () => {
+  // Helper: build N events 30s apart inside one 5h window, each with
+  // given (input, output) tokens. Returns a WindowBucket-ready list.
+  const mk = (ts: string, inTok: number, outTok: number, reqId?: string): ScanEvent => ({
+    ts, inputTokens: inTok, outputTokens: outTok,
+    cacheReadTokens: 99999, // deliberately huge — token sim must exclude this
+    cacheCreationTokens: 0,
+    provider: "claude", model: "claude-opus-4",
+    requestId: reqId,
+  });
+
+  it("returns empty rows for empty windows (no divide-by-zero)", () => {
+    const planLimits = {
+      "claude-pro": { label: "Claude Pro", monthlyUsd: 20, messagesPer5h: [10, 45] as [number, number], tokensPer5h: 44000 },
+    };
+    const sim = simulateTokenDowngrade([], planLimits);
+    expect(sim.totalWindows).toBe(0);
+    expect(sim.avgTokensPerWindow).toBe(0);
+    expect(sim.peakTokensPerWindow).toBe(0);
+    expect(sim.rows).toHaveLength(1);
+    expect(sim.rows[0].hitCount).toBe(0);
+    expect(sim.rows[0].hitPct).toBe(0);
+    expect(sim.rows[0].verdict.kind).toBe("smooth");
+  });
+
+  it("uses totalTokens (uncached input+output) against plan token cap", () => {
+    // Three windows with totalTokens = 30k, 100k, 250k. Cache-read
+    // tokens are 99999 per event — those must NOT count.
+    const windows = compute5hWindows([
+      mk("2026-03-10T09:00:00Z", 20000, 10000, "a"),   // 30k
+      mk("2026-03-11T09:00:00Z", 70000, 30000, "b"),   // 100k
+      mk("2026-03-12T09:00:00Z", 200000, 50000, "c"),  // 250k
+    ]);
+    expect(windows).toHaveLength(3);
+    expect(windows.map(w => w.totalTokens)).toEqual([30000, 100000, 250000]);
+
+    const planLimits = {
+      "claude-pro":    { label: "Claude Pro",    monthlyUsd: 20,  messagesPer5h: [10, 45]    as [number, number | null], tokensPer5h: 44000  },
+      "claude-max-5":  { label: "Claude Max 5",  monthlyUsd: 100, messagesPer5h: [225, null] as [number, null],          tokensPer5h: 88000  },
+      "claude-max-20": { label: "Claude Max 20", monthlyUsd: 200, messagesPer5h: [900, null] as [number, null],          tokensPer5h: 220000 },
+      // No tokensPer5h → excluded from the token sim entirely.
+      "openai-pro":    { label: "OpenAI Pro",    monthlyUsd: 100, messagesPer5h: [50, 300]   as [number, number | null] },
+    };
+    const sim = simulateTokenDowngrade(windows, planLimits);
+    expect(sim.rows.map(r => r.key)).toEqual(["claude-pro", "claude-max-5", "claude-max-20"]);
+
+    const pro = sim.rows.find(r => r.key === "claude-pro")!;
+    expect(pro.hitCount).toBe(2);    // 100k and 250k exceed 44k
+    expect(pro.verdict.kind).toBe("unusable"); // ~66.7% > 60% threshold
+
+    const max5 = sim.rows.find(r => r.key === "claude-max-5")!;
+    expect(max5.hitCount).toBe(2);   // 100k and 250k exceed 88k
+
+    const max20 = sim.rows.find(r => r.key === "claude-max-20")!;
+    expect(max20.hitCount).toBe(1);  // only 250k exceeds 220k
+    // Summary metrics from windows:
+    expect(sim.peakTokensPerWindow).toBe(250000);
+    expect(Math.round(sim.avgTokensPerWindow)).toBe(Math.round((30000 + 100000 + 250000) / 3));
+  });
+
+  it("carries plan family through rows (lets renderers filter same-provider)", () => {
+    const windows = compute5hWindows([mk("2026-03-10T09:00:00Z", 10, 5, "a")]);
+    const planLimits = {
+      "claude-pro":  { label: "Claude Pro",  monthlyUsd: 20, messagesPer5h: [10, 45] as [number, number], tokensPer5h: 44000 },
+      "mistral-pro": { label: "Mistral Pro", monthlyUsd: 15, messagesPer5h: null as null,                 tokensPer5h: 50000 },
+    };
+    const sim = simulateTokenDowngrade(windows, planLimits);
+    const byKey = Object.fromEntries(sim.rows.map(r => [r.key, r]));
+    expect(byKey["claude-pro"].family).toBe("claude");
+    expect(byKey["mistral-pro"].family).toBe("mistral");
   });
 });

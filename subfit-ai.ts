@@ -53,6 +53,12 @@ interface PlanLimits {
    *                      Simulation uses `lo` as the effective cap.
    */
   messagesPer5h: [number, number | null] | null;
+  /** Uncached-token cap per 5-hour window (input + output; cache-read
+   *  tokens are excluded at the event layer already). Used by the
+   *  token-based downgrade simulation; orthogonal to messagesPer5h.
+   *  Unset → plan is skipped in the token sim. Community estimates
+   *  (milvus.io / Faros.ai); cite via `_tokensSource`. */
+  tokensPer5h?: number | null;
   /** Max sessions (~distinct JSONL files) per month; null = no session cap. */
   sessionsCap?: number | null;
   /** Monthly message cap used by the monthly-quota simulation. Plans
@@ -2155,6 +2161,82 @@ function priceStr(usd: number | null): string {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
+// Token-based 5h simulation
+//
+// Runs alongside — not instead of — the message-based simulation. The
+// message sim compares window.messageCount (requestId-deduped) against
+// plan.messagesPer5h; the token sim compares window.totalTokens
+// (uncached input + output, already excludes cache_read at the event
+// layer) against plan.tokensPer5h. Anthropic applies both caps — a
+// window can throttle on whichever hits first — so we report both.
+//
+// Token caps are community estimates (milvus.io / faros.ai). Anthropic
+// publishes the message bands officially; the token figures are
+// inferred from progress-bar observations and aggregate usage reports.
+// Treat this section as a secondary check, not an authoritative bound.
+// ───────────────────────────────────────────────────────────────────────────
+
+export interface TokenDowngradeRow {
+  key: string;
+  label: string;
+  monthlyUsd: number | null;
+  family: PlanFamily;
+  /** Plan's published token cap per 5h window. */
+  tokensPer5h: number;
+  totalWindows: number;
+  hitCount: number;
+  hitPct: number;
+  verdict: { kind: HitRateKind; badge: string };
+}
+
+export interface TokenDowngradeSimulation {
+  totalWindows: number;
+  /** Average uncached tokens per active window. 0 when no windows. */
+  avgTokensPerWindow: number;
+  peakTokensPerWindow: number;
+  rows: TokenDowngradeRow[];
+}
+
+export function simulateTokenDowngrade(
+  windows: WindowBucket[],
+  planLimits: Record<string, PlanLimits>,
+): TokenDowngradeSimulation {
+  const rows: TokenDowngradeRow[] = [];
+  for (const [key, plan] of Object.entries(planLimits)) {
+    const cap = plan.tokensPer5h;
+    if (cap == null || cap <= 0) continue;
+    let hitCount = 0;
+    for (const w of windows) {
+      if (w.totalTokens > cap) hitCount++;
+    }
+    const hitPct = windows.length === 0 ? 0 : (hitCount / windows.length) * 100;
+    rows.push({
+      key, label: plan.label, monthlyUsd: plan.monthlyUsd,
+      family: planFamilyOf(key),
+      tokensPer5h: cap,
+      totalWindows: windows.length,
+      hitCount, hitPct,
+      verdict: hitRateBadge(hitPct),
+    });
+  }
+  rows.sort((a, b) => (a.monthlyUsd ?? Infinity) - (b.monthlyUsd ?? Infinity));
+
+  let totalTokens = 0, peak = 0;
+  for (const w of windows) {
+    totalTokens += w.totalTokens;
+    if (w.totalTokens > peak) peak = w.totalTokens;
+  }
+  const avgTokensPerWindow = windows.length === 0 ? 0 : totalTokens / windows.length;
+
+  return {
+    totalWindows: windows.length,
+    avgTokensPerWindow,
+    peakTokensPerWindow: peak,
+    rows,
+  };
+}
+
+// ───────────────────────────────────────────────────────────────────────────
 // Monthly quota simulation
 //
 // Same event stream the 5h sim uses, grouped by YYYY-MM instead of 5h
@@ -2699,6 +2781,64 @@ function renderSplitDowngradeSection(
   return out.join("\n") + "\n";
 }
 
+/** Render the token-based 5h simulation as a same-provider downgrade
+ *  ladder (anchor = priciest family plan with a token cap; rows =
+ *  cheaper family plans). Message-based and token-based sections are
+ *  peers — Anthropic enforces both caps simultaneously, so the two
+ *  answers together are more useful than either alone. Empty string
+ *  when no plan in the user's family has tokensPer5h set. */
+function renderTokenDowngradeSection(
+  sim: TokenDowngradeSimulation,
+  currentFamily: PlanFamily,
+): string {
+  if (sim.totalWindows === 0 || sim.rows.length === 0) return "";
+
+  // Restrict to same-family rows for the ladder view; master's spec
+  // defines token caps only for Claude today, so cross-family rows
+  // would be empty anyway.
+  const familyRows = sim.rows.filter(r => r.family === currentFamily);
+  if (familyRows.length === 0) return "";
+
+  // Anchor: priciest priced plan with a token cap. Everything cheaper
+  // becomes a downgrade candidate. Keep custom-priced plans out of the
+  // anchor pool for the same reason as the message sim (not actionable).
+  const priced = familyRows.filter(r => r.monthlyUsd != null);
+  if (priced.length === 0) return "";
+  const anchor = priced.reduce((a, b) => ((a.monthlyUsd ?? 0) >= (b.monthlyUsd ?? 0) ? a : b));
+  const cheaper = familyRows
+    .filter(r => r.key !== anchor.key && (r.monthlyUsd ?? Infinity) < (anchor.monthlyUsd ?? 0))
+    .sort((a, b) => (b.monthlyUsd ?? 0) - (a.monthlyUsd ?? 0)); // priciest-first as we step down
+
+  const out: string[] = [];
+  out.push("── 5h-window simulation: token-based (community estimates) ──");
+  out.push(`${sim.totalWindows.toLocaleString()} active 5h windows analyzed`);
+  out.push(`Avg uncached tokens per window: ${fmtTokens(Math.round(sim.avgTokensPerWindow))} / Peak: ${fmtTokens(sim.peakTokensPerWindow)}`);
+  out.push("");
+  out.push(`Same-provider downgrade (${familyLabel(currentFamily)}), starting from ${anchor.label} at ${priceStr(anchor.monthlyUsd)}:`);
+  if (cheaper.length === 0) {
+    out.push(`  (no cheaper ${familyLabel(currentFamily)} tier has a published token cap)`);
+  } else {
+    const header = ["Plan", "Price/mo", "Token cap (5h)", "Windows over cap", "Hit %", "Verdict"];
+    const body: string[][] = [];
+    for (const r of cheaper) {
+      body.push([
+        r.label,
+        priceStr(r.monthlyUsd),
+        fmtTokens(r.tokensPer5h),
+        `${r.hitCount.toLocaleString()} / ${r.totalWindows.toLocaleString()}`,
+        `${r.hitPct.toFixed(1)}%`,
+        r.verdict.badge,
+      ]);
+    }
+    out.push(renderTable(header, body).join("\n"));
+  }
+  out.push("");
+  out.push("⚠ Token caps are community estimates (milvus.io, faros.ai). Anthropic");
+  out.push("  publishes message-count bands only. This section uses uncached input +");
+  out.push("  output tokens (cache-read excluded per Anthropic docs).");
+  return out.join("\n") + "\n";
+}
+
 /** Render the monthly-quota simulation table. Empty string when there
  *  are no months or no plans with monthly caps. Appends cross-plan
  *  unit-mismatch disclaimers whenever a non-default unit (e.g.
@@ -3214,6 +3354,7 @@ function main(): number {
   // no 5h cap (Copilot) but a tight monthly cap cannot be recommended.
   const windows = compute5hWindows(ctx.events);
   const downgradeSim = simulateDowngrade(windows, planLimits);
+  const tokenDowngradeSim = simulateTokenDowngrade(windows, planLimits);
   const monthBuckets = groupEventsByMonth(ctx.events);
   const monthlySim = simulateMonthlyQuota(monthBuckets, planLimits);
   const monthlyBlockedKeys = new Set(
@@ -3277,6 +3418,7 @@ function main(): number {
       subscriptionVerdicts,
       bestFit: bestFitPayload,
       downgradeSimulation: downgradeSim,
+      tokenDowngradeSimulation: tokenDowngradeSim,
       monthlyQuotaSimulation: monthlySim,
       hourlyDistribution: args.hourly ? computeHourlyDistribution(ctx.events) : null,
       byModel: rows,
@@ -3330,6 +3472,10 @@ function main(): number {
   const downgradeBlock = renderSplitDowngradeSection(downgradeSim, subStats.daysSpanned, currentFamily);
   if (downgradeBlock) {
     out.push(downgradeBlock);
+  }
+  const tokenDowngradeBlock = renderTokenDowngradeSection(tokenDowngradeSim, currentFamily);
+  if (tokenDowngradeBlock) {
+    out.push(tokenDowngradeBlock);
   }
   const monthlyBlock = renderMonthlySimSection(monthlySim);
   if (monthlyBlock) {
