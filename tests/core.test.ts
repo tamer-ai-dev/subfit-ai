@@ -15,6 +15,8 @@ import {
   planFamilyOf,
   detectCurrentFamily,
   fmtPathForDisplay,
+  pickBestFromSim,
+  pickBudgetFromSim,
   type ScanEvent,
 } from "../subfit-ai.ts";
 
@@ -668,5 +670,68 @@ describe("fmtPathForDisplay", () => {
     expect(fmtPathForDisplay("config.json")).toBe("config.json");
     expect(fmtPathForDisplay("./config.json")).toBe("./config.json");
     expect(fmtPathForDisplay("embedded defaults")).toBe("embedded defaults");
+  });
+});
+
+describe("pickBestFromSim / pickBudgetFromSim", () => {
+  const mkRow = (key: string, monthlyUsd: number | null, hitPct: number, opts: { monthlyMetered?: boolean } = {}) => ({
+    key, label: key, monthlyUsd,
+    family: "claude" as const,
+    msgsPer5h: opts.monthlyMetered ? null : 45,
+    totalWindows: 100,
+    hitCount: Math.round(hitPct),
+    hitPct,
+    verdict: { kind: "painful" as const, badge: "painful" },
+    monthlyMetered: opts.monthlyMetered ?? false,
+  });
+
+  it("picks the lowest-hit-rate plan, excluding custom pricing and monthly-metered", () => {
+    const rows = [
+      mkRow("max-20",      200, 8.0),   // best by hit%
+      mkRow("max-5",       100, 43.0),
+      mkRow("pro",          20, 76.0),
+      mkRow("enterprise", null, 0.0),   // custom pricing → excluded
+      mkRow("copilot-pro",  10, 0.0, { monthlyMetered: true }), // Copilot-style → excluded
+    ];
+    const best = pickBestFromSim(rows)!;
+    expect(best.key).toBe("max-20");    // 8% beats 43/76; custom and Copilot filtered out
+  });
+
+  it("breaks hit-rate ties by cheaper price", () => {
+    const rows = [
+      mkRow("a", 200, 5.0),
+      mkRow("b", 100, 5.0),  // same hit rate, cheaper → wins
+      mkRow("c",  50, 5.0),  // same hit rate, even cheaper → wins overall
+    ];
+    const best = pickBestFromSim(rows)!;
+    expect(best.key).toBe("c");
+  });
+
+  it("returns null when every candidate is custom-priced or monthly-metered", () => {
+    const rows = [
+      mkRow("enterprise", null, 0.0),
+      mkRow("copilot-free", 0, 0.0, { monthlyMetered: true }),
+    ];
+    expect(pickBestFromSim(rows)).toBeNull();
+  });
+
+  it("pickBudgetFromSim returns the highest-priced plan strictly below the ceiling", () => {
+    const rows = [
+      mkRow("max-20", 200, 8.0),   // ceiling — excluded
+      mkRow("max-5",  100, 43.0),  // one rung down → wins
+      mkRow("team",    30, 76.0),
+      mkRow("pro",     20, 76.0),
+    ];
+    // Master's spec: budget option is the NEXT-cheapest below best-fit,
+    // not the absolute cheapest. 100 < 200 and is the highest under 200.
+    const budget = pickBudgetFromSim(rows, "max-20", 200)!;
+    expect(budget.key).toBe("max-5");
+  });
+
+  it("pickBudgetFromSim returns null when nothing is cheaper", () => {
+    const rows = [
+      mkRow("cheapest", 20, 5.0),
+    ];
+    expect(pickBudgetFromSim(rows, "cheapest", 20)).toBeNull();
   });
 });

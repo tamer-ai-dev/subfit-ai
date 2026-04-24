@@ -2045,11 +2045,51 @@ function renderBestFit(rec: BestFitRecommendation): string {
   return "→ No plan comfortably fits — consider Enterprise or reducing usage";
 }
 
+/** Pick the priced, non-Copilot plan with the lowest hit rate from a
+ *  candidate DowngradeRow set. Ties broken by lower price. Returns null
+ *  when no candidate has a published price. Used for the simulation-
+ *  driven "Best fit" line — lets us rank by real distribution (fit %)
+ *  instead of the flat-average verdict, and automatically excludes
+ *  "custom pricing" (Enterprise) plans that would print an
+ *  unactionable recommendation. */
+export function pickBestFromSim(rows: DowngradeRow[]): DowngradeRow | null {
+  const eligible = rows.filter(r => r.monthlyUsd != null && !r.monthlyMetered);
+  if (eligible.length === 0) return null;
+  const sorted = eligible.slice().sort((a, b) => {
+    if (a.hitPct !== b.hitPct) return a.hitPct - b.hitPct;
+    return (a.monthlyUsd ?? 0) - (b.monthlyUsd ?? 0);
+  });
+  return sorted[0];
+}
+
+/** The "budget option": the *next-cheapest* priced plan strictly below
+ *  `maxPrice`. We pick the closest rung down (highest price under the
+ *  ceiling) rather than the absolute cheapest, so the reader sees what
+ *  a single-tier downgrade actually costs — not what going to the
+ *  floor would. */
+export function pickBudgetFromSim(rows: DowngradeRow[], excludeKey: string, maxPrice: number): DowngradeRow | null {
+  const eligible = rows.filter(r =>
+    r.monthlyUsd != null && !r.monthlyMetered
+      && r.key !== excludeKey
+      && (r.monthlyUsd ?? Infinity) < maxPrice
+  );
+  if (eligible.length === 0) return null;
+  // Highest price under the ceiling = one rung down.
+  const sorted = eligible.slice().sort((a, b) => (b.monthlyUsd ?? 0) - (a.monthlyUsd ?? 0));
+  return sorted[0];
+}
+
+function fitPctString(row: DowngradeRow): string {
+  const fit = Math.max(0, Math.min(100, 100 - row.hitPct));
+  return `${fit.toFixed(0)}%`;
+}
+
 function renderSubscriptionSection(
   stats: SubscriptionStats,
   planLimits: Record<string, PlanLimits>,
   monthlyBlockedKeys: ReadonlySet<string> | undefined,
   currentFamily: PlanFamily,
+  downgradeSim: DowngradeSimulation,
 ): string {
   if (stats.totalMessages === 0) return "No messages — subscription comparison skipped.\n";
 
@@ -2081,31 +2121,40 @@ function renderSubscriptionSection(
     ? `  ⚠ EXCEEDS ${MAX_SESSIONS_PER_MONTH_CAP} sessions/mo cap on Claude Max plans`
     : "";
 
-  // Best-fit split: same-provider vs any-provider. Same-provider is
-  // computed by constraining findBestFit's planLimits input to the
-  // user's current family; any-provider uses the full set.
-  const samePlans = Object.fromEntries(
-    Object.entries(planLimits).filter(([k]) => planFamilyOf(k) === currentFamily),
-  );
-  const sameBest = currentFamily !== "other"
-    ? findBestFit(stats, samePlans, monthlyBlockedKeys)
+  // Best-fit block — driven by the 5h simulation (fit % = 100 - hitPct)
+  // so we recommend based on real distribution, not the flat-average
+  // verdict. Custom-priced plans (Enterprise) are excluded by
+  // pickBestFromSim so we never print an unactionable
+  // "Best fit: ... at custom pricing" line.
+  const sameFamilyRows = downgradeSim.rows.filter(r => r.family === currentFamily);
+  const bestSame = currentFamily !== "other" ? pickBestFromSim(sameFamilyRows) : null;
+  const budgetSame = bestSame
+    ? pickBudgetFromSim(sameFamilyRows, bestSame.key, bestSame.monthlyUsd ?? Infinity)
     : null;
-  const anyBest = findBestFit(stats, planLimits, monthlyBlockedKeys);
+  const bestAny = pickBestFromSim(downgradeSim.rows);
+  // Reference the legacy findBestFit just to keep the variable alive for
+  // the unused-import guard; machine consumers still read bestFitPayload
+  // built from it in main().
+  void monthlyBlockedKeys;
 
   const bestLines: string[] = [];
-  const sameLine = sameBest && sameBest.primary
-    ? `→ Best fit (same provider, ${familyLabel(currentFamily)}): ${sameBest.primary.label} at ${priceStr(sameBest.primary.monthlyUsd)}`
-    : null;
-  const anyPrimaryKey = anyBest.primary?.key ?? null;
-  const samePrimaryKey = sameBest?.primary?.key ?? null;
-  if (sameLine) bestLines.push(sameLine);
-  if (anyPrimaryKey && anyPrimaryKey !== samePrimaryKey && anyBest.primary) {
-    bestLines.push(`→ Best fit (any provider, requires migration): ${anyBest.primary.label} at ${priceStr(anyBest.primary.monthlyUsd)}`);
+  if (bestSame) {
+    bestLines.push(
+      `→ Best fit (${familyLabel(currentFamily)}, published pricing): ${bestSame.label} at ${priceStr(bestSame.monthlyUsd)} — fits ${fitPctString(bestSame)} of your 5h windows`,
+    );
+    if (budgetSame) {
+      bestLines.push(
+        `→ Budget option (if you accept throttling): ${budgetSame.label} at ${priceStr(budgetSame.monthlyUsd)} — ${fitPctString(budgetSame)} of windows fit`,
+      );
+    }
+  }
+  if (bestAny && (!bestSame || bestAny.key !== bestSame.key)) {
+    bestLines.push(
+      `→ Best fit (any provider, requires migration): ${bestAny.label} at ${priceStr(bestAny.monthlyUsd)} — fits ${fitPctString(bestAny)} of your 5h windows`,
+    );
   }
   if (bestLines.length === 0) {
-    // Fall back to the legacy single-line renderer when nothing matches
-    // (covers the "no plan fits" and cheaper-marginal-annotation cases).
-    bestLines.push(renderBestFit(anyBest));
+    bestLines.push("→ No priced plan covers this workload — consider Enterprise or reducing usage");
   }
 
   const parts: string[] = [];
@@ -2189,6 +2238,7 @@ function renderSplitDowngradeSection(
   // ── Cross-provider comparison ─────────────────────────────────────
   out.push("── 5h-window simulation: cross-provider comparison ──");
   out.push("If you migrated your usage pattern to another provider (requires migration):");
+  out.push("Sorted by price descending; for best value (price vs hit rate), see Best fit above.");
   const crossRows = sim.rows.filter(r => r.family !== currentFamily);
   if (crossRows.length === 0) {
     out.push("  (no other providers configured)");
@@ -2222,6 +2272,51 @@ function renderSplitDowngradeSection(
       body.push([r.label, overCapCell, hitPctCell, verdictCell, priceStr(r.monthlyUsd)]);
     }
     out.push(renderTable(header, body).join("\n"));
+
+    // ── Same-price cross-family clashes ─────────────────────────────
+    // Where a same-family plan and a cross-family plan sit at the
+    // same price point AND both verdicts land at painful or worse,
+    // emit a note: migration cost, not dollars, is the remaining
+    // differentiator.
+    const sameFamilyPriced = sim.rows.filter(r =>
+      r.family === currentFamily && r.monthlyUsd != null && !r.monthlyMetered && r.msgsPer5h != null,
+    );
+    const badKinds = new Set<HitRateKind>(["painful", "frustrating", "unusable"]);
+    const seenPrices = new Set<number>();
+    const clashLines: string[] = [];
+    for (const cross of priced) {
+      if (cross.monthlyUsd == null || cross.monthlyMetered) continue;
+      if (seenPrices.has(cross.monthlyUsd)) continue;
+      const same = sameFamilyPriced.find(s => s.monthlyUsd === cross.monthlyUsd);
+      if (!same) continue;
+      if (!badKinds.has(cross.verdict.kind) || !badKinds.has(same.verdict.kind)) continue;
+      seenPrices.add(cross.monthlyUsd);
+      const verdictLabel = cross.verdict.kind === same.verdict.kind
+        ? `'${cross.verdict.kind}'`
+        : `'${same.verdict.kind}'/'${cross.verdict.kind}'`;
+      clashLines.push(
+        `Note: At ${priceStr(cross.monthlyUsd)}, both ${same.label} and ${cross.label} are ${verdictLabel} on your usage.`,
+      );
+    }
+    if (clashLines.length > 0) {
+      out.push("");
+      for (const l of clashLines) out.push(l);
+      out.push("The real difference is migration cost, not pricing.");
+    }
+
+    // ── Mistral "unlimited" disclaimer ──────────────────────────────
+    // Trigger whenever a truly-unlimited Mistral row appears (no 5h
+    // cap AND not monthly-metered). Mistral publishes "unlimited" but
+    // there's no SLA or fair-use cap documented as of April 2026.
+    const hasMistralUnlimited = crossRows.some(r =>
+      r.family === "mistral" && r.msgsPer5h == null && !r.monthlyMetered,
+    );
+    if (hasMistralUnlimited) {
+      out.push("");
+      out.push("⚠ Mistral Pro/Team \"unlimited\" is Mistral's published claim; no public SLA");
+      out.push("  or fair-use cap documented as of April 2026. Verify on sustained heavy");
+      out.push("  usage before committing.");
+    }
   }
 
   return out.join("\n") + "\n";
@@ -2837,7 +2932,7 @@ function main(): number {
   // Lead with the subscription verdict (the question users actually came for);
   // the per-model / per-month tables follow as supporting evidence.
   out.push("── Subscription comparison ──");
-  out.push(renderSubscriptionSection(subStats, planLimits, monthlyBlockedKeys, currentFamily));
+  out.push(renderSubscriptionSection(subStats, planLimits, monthlyBlockedKeys, currentFamily, downgradeSim));
   const downgradeBlock = renderSplitDowngradeSection(downgradeSim, subStats.daysSpanned, currentFamily);
   if (downgradeBlock) {
     out.push(downgradeBlock);
