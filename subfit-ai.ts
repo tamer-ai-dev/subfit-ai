@@ -18,7 +18,7 @@
  */
 
 import { readdirSync, readFileSync, statSync, existsSync, writeFileSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, dirname, relative, isAbsolute } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 
@@ -1368,10 +1368,28 @@ function fmtUsd(n: number): string {
 }
 
 function fmtTokens(n: number): string {
+  // Suffixes are SI powers of ten (k=10³, M=10⁶, B=10⁹) — NOT bytes.
+  // Token totals can exceed 10¹⁰ on cache-heavy Claude Code workloads
+  // so the B threshold is load-bearing, not decorative.
   if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(2)}B`;
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
   return String(n);
+}
+
+/** Render a filesystem path relative to the current working directory
+ *  when practical, falling back to the raw path when the relative form
+ *  would escape cwd (starts with "..") or when the input is already
+ *  non-absolute. Paths that are sentinels like "embedded defaults" (not
+ *  filesystem paths) pass through unchanged — callers guard for that
+ *  upstream. */
+export function fmtPathForDisplay(p: string): string {
+  if (!isAbsolute(p)) return p;
+  const rel = relative(process.cwd(), p);
+  // Empty string = p IS cwd; leading ".." = escaped cwd, keep absolute.
+  if (rel === "") return "./";
+  if (rel.startsWith("..")) return p;
+  return rel.startsWith(".") ? rel : `./${rel}`;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -2257,7 +2275,7 @@ function renderScanSummary(providers: ProviderStats[], ctx: ScanContext, configS
   const out: string[] = ["── Scan summary ──"];
   if (active.length === 0) {
     out.push("No session files found.");
-    out.push(`Config: ${configSource === "fallback" ? "embedded defaults" : configSource}`);
+    out.push(`Config: ${configSource === "fallback" ? "embedded defaults" : fmtPathForDisplay(configSource)}`);
     return out.join("\n") + "\n";
   }
 
@@ -2311,7 +2329,13 @@ function renderScanSummary(providers: ProviderStats[], ctx: ScanContext, configS
     `${fmtTokens(cacheRead)} cache-read, ${fmtTokens(cacheWrite)} cache-write ` +
     `(all providers combined)`,
   );
-  out.push(`Config: ${configSource === "fallback" ? "embedded defaults" : configSource}`);
+  // Cache-read totals dwarf everything else on tool-heavy Claude Code
+  // usage — make it explicit that this is a cost signal, not a
+  // rate-limit signal, so readers don't conflate the two.
+  if (cacheRead > 0) {
+    out.push(`  (cache-read and cache-write affect cost only; they don't count toward 5h message limits)`);
+  }
+  out.push(`Config: ${configSource === "fallback" ? "embedded defaults" : fmtPathForDisplay(configSource)}`);
   return out.join("\n") + "\n";
 }
 

@@ -14,6 +14,7 @@ import {
   simulateMonthlyQuota,
   planFamilyOf,
   detectCurrentFamily,
+  fmtPathForDisplay,
   type ScanEvent,
 } from "../subfit-ai.ts";
 
@@ -647,5 +648,25 @@ describe("planFamilyOf + detectCurrentFamily", () => {
 
   it("returns 'other' when byModel is empty", () => {
     expect(detectCurrentFamily(new Map())).toBe("other");
+  });
+});
+
+describe("fmtPathForDisplay", () => {
+  it("rewrites an absolute path inside cwd to a ./-prefixed relative form", () => {
+    const inside = `${process.cwd()}/config.json`;
+    expect(fmtPathForDisplay(inside)).toBe("./config.json");
+  });
+
+  it("keeps the raw absolute path when the target is outside cwd", () => {
+    // An absolute path far from cwd — relative() would produce a `..`
+    // chain; we prefer the unambiguous absolute form in that case.
+    const outside = "/etc/hosts";
+    expect(fmtPathForDisplay(outside)).toBe("/etc/hosts");
+  });
+
+  it("passes non-absolute paths through unchanged", () => {
+    expect(fmtPathForDisplay("config.json")).toBe("config.json");
+    expect(fmtPathForDisplay("./config.json")).toBe("./config.json");
+    expect(fmtPathForDisplay("embedded defaults")).toBe("embedded defaults");
   });
 });
