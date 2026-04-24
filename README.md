@@ -21,6 +21,12 @@ JSON/JSONL for Gemini, Vibe, Codex, and OpenCode) the five CLIs already
 write to disk.
 
 ## Report
+
+> First time looking at this output? Read
+> [**docs/how-to-read-the-report.md**](docs/how-to-read-the-report.md)
+> — it walks each section top-to-bottom and explains what every column
+> actually measures.
+
 ```
 ── Scan summary ──
 Provider  Files  Entries  Messages  With tokens  Parse-errors  Date range
