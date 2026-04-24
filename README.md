@@ -58,7 +58,10 @@ in parallel and merged into a single report:
 
 - **Claude Code** appends one JSON event per line to
   `~/.claude/projects/<cwd-slug>/<sessionId>.jsonl` (one file per
-  session, JSONL format).
+  session, JSONL format). See
+  [`docs/claude-pricing.md`](docs/claude-pricing.md) for the plan
+  tiers, 5h-window model, and what `subfit-ai` treats as a "message"
+  (distinct `requestId`, not raw JSONL lines).
 - **Gemini CLI** writes one JSON object per session to
   `~/.gemini/tmp/<slug>/chats/session-*.json` (full JSON, one file per
   session). See `docs/studies/STUDY-gemini-tokens.md` for the format
