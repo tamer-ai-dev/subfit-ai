@@ -69,7 +69,7 @@ describe("scanGeminiSession", () => {
   const freshCtx = (): ScanContext => ({
     byModel: new Map(),
     byMonth: new Map(),
-    minTs: null, maxTs: null,
+    minTs: null, maxTs: null, events: [],
     totalLines: 0, assistantLines: 0, withUsage: 0, parseErrors: 0,
     unknownClaudeModels: new Set(),
     unknownGeminiModels: new Set(),
@@ -109,6 +109,17 @@ describe("scanGeminiSession", () => {
     expect(ctx.byModel.get("gemini-flash")?.cacheCreationTokens).toBe(0); // Gemini has no cache-write
     expect(ctx.minTs).toBe("2026-04-23T08:00:00.000Z");
     expect(ctx.maxTs).toBe("2026-04-23T08:01:00.000Z");
+
+    // Per-turn timeline retained for 5h-window analysis: one event per
+    // priced turn, tagged with the normalised pricing key and provider.
+    expect(ctx.events).toHaveLength(2);
+    expect(ctx.events[0]).toMatchObject({
+      ts: "2026-04-23T08:00:00.000Z",
+      inputTokens: 1000, outputTokens: 200, cacheReadTokens: 500,
+      cacheCreationTokens: 0,
+      provider: "gemini", model: "gemini-pro",
+    });
+    expect(ctx.events[1].model).toBe("gemini-flash");
   });
 
   it("skips user messages and gemini turns without tokens", () => {

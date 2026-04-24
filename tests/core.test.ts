@@ -6,6 +6,8 @@ import {
   costOn,
   computeSubscriptionStats,
   sanitizeForTerminal,
+  sortEvents,
+  type ScanEvent,
 } from "../subfit-ai.ts";
 
 describe("normalizeModel", () => {
@@ -178,5 +180,45 @@ describe("computeSubscriptionStats", () => {
   it("computes avgSessionsPerMonth from explicit totals", () => {
     const s = computeSubscriptionStats(100, "2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z", 60, 2);
     expect(s.avgSessionsPerMonth).toBe(30);
+  });
+});
+
+describe("sortEvents", () => {
+  const mk = (ts: string): ScanEvent => ({
+    ts, inputTokens: 0, outputTokens: 0,
+    cacheReadTokens: 0, cacheCreationTokens: 0,
+    provider: "claude", model: "claude-opus-4",
+  });
+
+  it("handles empty input without throwing", () => {
+    const arr: ScanEvent[] = [];
+    expect(sortEvents(arr)).toEqual([]);
+    expect(arr).toEqual([]);
+  });
+
+  it("sorts unordered ISO timestamps ascending and mutates in place", () => {
+    const arr = [
+      mk("2026-03-12T10:00:00Z"),
+      mk("2026-03-10T09:00:00Z"),
+      mk("2026-03-11T23:59:59Z"),
+    ];
+    const returned = sortEvents(arr);
+    expect(returned).toBe(arr); // same reference — in-place
+    expect(arr.map(e => e.ts)).toEqual([
+      "2026-03-10T09:00:00Z",
+      "2026-03-11T23:59:59Z",
+      "2026-03-12T10:00:00Z",
+    ]);
+  });
+
+  it("leaves already-sorted input unchanged and preserves ties stably", () => {
+    const a = mk("2026-01-01T00:00:00Z"); a.inputTokens = 1;
+    const b = mk("2026-01-01T00:00:00Z"); b.inputTokens = 2;
+    const c = mk("2026-01-02T00:00:00Z"); c.inputTokens = 3;
+    const arr = [a, b, c];
+    sortEvents(arr);
+    expect(arr).toEqual([a, b, c]);
+    expect(arr[0].inputTokens).toBe(1);
+    expect(arr[1].inputTokens).toBe(2);
   });
 });

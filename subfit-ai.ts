@@ -405,11 +405,31 @@ export function yearMonth(ts: string | undefined): string | null {
   return ts.slice(0, 7);
 }
 
+/** One priced assistant turn, kept for rolling-window analysis.
+ *  Populated only when the turn has BOTH a usable ISO timestamp AND a
+ *  usage block — those are the only turns we can place on a timeline
+ *  and attribute to a 5h window. */
+export interface ScanEvent {
+  /** ISO 8601 timestamp lexicographically comparable. */
+  ts: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  /** Source CLI. Lets the windowing layer slice per-provider if needed. */
+  provider: "claude" | "gemini" | "vibe" | "codex" | "opencode";
+  /** Normalised pricing key (same key as ScanContext.byModel). */
+  model: string;
+}
+
 interface ScanContext {
   byModel: Map<string, ModelTotals>;
   byMonth: Map<string, Map<string, ModelTotals>>;
   minTs: string | null;
   maxTs: string | null;
+  /** Per-turn timeline for 5h-window analysis. Unsorted during scan;
+   *  callers that need ordered access should invoke sortEvents() once. */
+  events: ScanEvent[];
   totalLines: number;
   assistantLines: number;
   withUsage: number;
@@ -431,6 +451,7 @@ function emptyScanContext(): ScanContext {
     byModel: new Map(),
     byMonth: new Map(),
     minTs: null, maxTs: null,
+    events: [],
     totalLines: 0, assistantLines: 0, withUsage: 0, parseErrors: 0,
     unknownClaudeModels: new Set(),
     unknownGeminiModels: new Set(),
@@ -438,6 +459,14 @@ function emptyScanContext(): ScanContext {
     unknownCodexModels: new Set(),
     unknownOpenCodeModels: new Set(),
   };
+}
+
+/** Sort a ScanEvent list ascending by timestamp. 5h-window bucketing
+ *  assumes ordered input; scanning appends in file-walk order which is
+ *  not guaranteed monotonic. Stable, mutates in place. */
+export function sortEvents(events: ScanEvent[]): ScanEvent[] {
+  events.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
+  return events;
 }
 
 /** Merge two scan contexts into a new one. Per-provider scanning fills its own
@@ -453,6 +482,9 @@ function mergeContexts(a: ScanContext, b: ScanContext): ScanContext {
   out.parseErrors    = a.parseErrors    + b.parseErrors;
   out.minTs = a.minTs && b.minTs ? (a.minTs < b.minTs ? a.minTs : b.minTs) : (a.minTs ?? b.minTs);
   out.maxTs = a.maxTs && b.maxTs ? (a.maxTs > b.maxTs ? a.maxTs : b.maxTs) : (a.maxTs ?? b.maxTs);
+  // Concatenate events — sort is deferred to the windowing caller so
+  // merges stay O(n) and we pay the O(n log n) sort cost only once.
+  out.events = a.events.concat(b.events);
 
   const foldTotals = (dst: ModelTotals, t: ModelTotals) => {
     dst.inputTokens        += t.inputTokens;
@@ -538,11 +570,21 @@ function scanJsonl(filePath: string, ctx: ScanContext): void {
     if (ts && (!ctx.minTs || ts < ctx.minTs)) ctx.minTs = ts;
     if (ts && (!ctx.maxTs || ts > ctx.maxTs)) ctx.maxTs = ts;
 
+    const inTok   = u.input_tokens ?? 0;
+    const outTok  = u.output_tokens ?? 0;
+    const crTok   = u.cache_read_input_tokens ?? 0;
+    const cwTok   = u.cache_creation_input_tokens ?? 0;
+    if (ts) ctx.events.push({
+      ts, inputTokens: inTok, outputTokens: outTok,
+      cacheReadTokens: crTok, cacheCreationTokens: cwTok,
+      provider: "claude", model,
+    });
+
     const addInto = (t: ModelTotals) => {
-      t.inputTokens += u.input_tokens ?? 0;
-      t.outputTokens += u.output_tokens ?? 0;
-      t.cacheReadTokens += u.cache_read_input_tokens ?? 0;
-      t.cacheCreationTokens += u.cache_creation_input_tokens ?? 0;
+      t.inputTokens += inTok;
+      t.outputTokens += outTok;
+      t.cacheReadTokens += crTok;
+      t.cacheCreationTokens += cwTok;
       t.messageCount++;
     };
 
@@ -649,10 +691,19 @@ export function scanGeminiSession(filePath: string, ctx: ScanContext): void {
     if (ts && (!ctx.minTs || ts < ctx.minTs)) ctx.minTs = ts;
     if (ts && (!ctx.maxTs || ts > ctx.maxTs)) ctx.maxTs = ts;
 
+    const inTok  = tokens.input ?? 0;
+    const outTok = tokens.output ?? 0;
+    const crTok  = tokens.cached ?? 0;
+    if (ts) ctx.events.push({
+      ts, inputTokens: inTok, outputTokens: outTok,
+      cacheReadTokens: crTok, cacheCreationTokens: 0,
+      provider: "gemini", model,
+    });
+
     const addInto = (t: ModelTotals) => {
-      t.inputTokens += tokens.input ?? 0;
-      t.outputTokens += tokens.output ?? 0;
-      t.cacheReadTokens += tokens.cached ?? 0;
+      t.inputTokens += inTok;
+      t.outputTokens += outTok;
+      t.cacheReadTokens += crTok;
       // Gemini has no cache-write equivalent; leave cacheCreationTokens alone.
       t.messageCount++;
     };
@@ -784,13 +835,22 @@ export function scanVibeSession(filePath: string, ctx: ScanContext): void {
     if (ts && (!ctx.minTs || ts < ctx.minTs)) ctx.minTs = ts;
     if (ts && (!ctx.maxTs || ts > ctx.maxTs)) ctx.maxTs = ts;
 
+    const inTok  = usage.prompt_tokens ?? usage.input_tokens ?? usage.input ?? 0;
+    const outTok = usage.completion_tokens ?? usage.output_tokens ?? usage.output ?? 0;
+    const crTok  = usage.cached_tokens ?? usage.cache_read_input_tokens ?? usage.cached ?? 0;
+    if (ts) ctx.events.push({
+      ts, inputTokens: inTok, outputTokens: outTok,
+      cacheReadTokens: crTok, cacheCreationTokens: 0,
+      provider: "vibe", model,
+    });
+
     const addInto = (t: ModelTotals) => {
       // Mistral API shape: prompt_tokens / completion_tokens. Claude and
       // Gemini shapes fall through as fallbacks so a Vibe build that
       // ever emits those doesn't silently zero the cost.
-      t.inputTokens     += usage.prompt_tokens ?? usage.input_tokens ?? usage.input ?? 0;
-      t.outputTokens    += usage.completion_tokens ?? usage.output_tokens ?? usage.output ?? 0;
-      t.cacheReadTokens += usage.cached_tokens ?? usage.cache_read_input_tokens ?? usage.cached ?? 0;
+      t.inputTokens     += inTok;
+      t.outputTokens    += outTok;
+      t.cacheReadTokens += crTok;
       // No cache-write tier documented for Devstral.
       t.messageCount++;
     };
@@ -938,12 +998,20 @@ export function scanCodexSession(filePath: string, ctx: ScanContext): void {
     if (ts && (!ctx.minTs || ts < ctx.minTs)) ctx.minTs = ts;
     if (ts && (!ctx.maxTs || ts > ctx.maxTs)) ctx.maxTs = ts;
 
+    const totalInput = usage.input_tokens ?? usage.prompt_tokens ?? 0;
+    const cached = usage.input_tokens_details?.cached_tokens ?? usage.cached_tokens ?? 0;
+    const inTok  = Math.max(0, totalInput - cached);
+    const outTok = usage.output_tokens ?? usage.completion_tokens ?? 0;
+    if (ts) ctx.events.push({
+      ts, inputTokens: inTok, outputTokens: outTok,
+      cacheReadTokens: cached, cacheCreationTokens: 0,
+      provider: "codex", model,
+    });
+
     const addInto = (t: ModelTotals) => {
-      const totalInput = usage.input_tokens ?? usage.prompt_tokens ?? 0;
-      const cached = usage.input_tokens_details?.cached_tokens ?? usage.cached_tokens ?? 0;
-      t.inputTokens     += Math.max(0, totalInput - cached);
+      t.inputTokens     += inTok;
       t.cacheReadTokens += cached;
-      t.outputTokens    += usage.output_tokens ?? usage.completion_tokens ?? 0;
+      t.outputTokens    += outTok;
       // Codex has no cache-write tier (cacheWrite:0 in config.json codex-*).
       t.messageCount++;
     };
@@ -1188,44 +1256,54 @@ export function scanOpenCodeSession(filePath: string, ctx: ScanContext): void {
     if (ts && (!ctx.minTs || ts < ctx.minTs)) ctx.minTs = ts;
     if (ts && (!ctx.maxTs || ts > ctx.maxTs)) ctx.maxTs = ts;
 
+    // Resolve the token quad once so the event log and the totals stay
+    // consistent. Branches mirror the previous per-provider logic.
+    let inTok = 0, outTok = 0, crTok = 0, cwTok = 0;
+    if (ocTokens) {
+      const cache = (ocTokens.cache && typeof ocTokens.cache === "object") ? ocTokens.cache : {};
+      inTok  = ocTokens.input ?? 0;
+      outTok = (ocTokens.output ?? 0) + (ocTokens.reasoning ?? 0);
+      crTok  = cache.read ?? 0;
+      cwTok  = cache.write ?? 0;
+    } else if (provider === "anthropic") {
+      inTok  = usage.input_tokens ?? 0;
+      outTok = usage.output_tokens ?? 0;
+      crTok  = usage.cache_read_input_tokens ?? 0;
+      cwTok  = usage.cache_creation_input_tokens ?? 0;
+    } else if (provider === "openai") {
+      const totalInput = usage.input_tokens ?? usage.prompt_tokens ?? 0;
+      const cached = usage.input_tokens_details?.cached_tokens ?? usage.cached_tokens ?? 0;
+      inTok  = Math.max(0, totalInput - cached);
+      crTok  = cached;
+      outTok = usage.output_tokens ?? usage.completion_tokens ?? 0;
+    } else if (provider === "google") {
+      inTok  = usage.input ?? usage.input_tokens ?? usage.prompt_tokens ?? 0;
+      outTok = usage.output ?? usage.output_tokens ?? usage.completion_tokens ?? 0;
+      crTok  = usage.cached ?? usage.cached_tokens ?? 0;
+    } else if (provider === "mistral") {
+      inTok  = usage.prompt_tokens ?? usage.input_tokens ?? usage.input ?? 0;
+      outTok = usage.completion_tokens ?? usage.output_tokens ?? usage.output ?? 0;
+      crTok  = usage.cached_tokens ?? usage.cache_read_input_tokens ?? usage.cached ?? 0;
+    } else {
+      // Unknown provider — permissive union so a new upstream doesn't
+      // silently zero usage until we ship a mapping.
+      inTok  = usage.input_tokens ?? usage.prompt_tokens ?? usage.input ?? 0;
+      outTok = usage.output_tokens ?? usage.completion_tokens ?? usage.output ?? 0;
+      crTok  = usage.cache_read_input_tokens ?? usage.cached_tokens ?? usage.cached ?? 0;
+      cwTok  = usage.cache_creation_input_tokens ?? 0;
+    }
+
+    if (ts) ctx.events.push({
+      ts, inputTokens: inTok, outputTokens: outTok,
+      cacheReadTokens: crTok, cacheCreationTokens: cwTok,
+      provider: "opencode", model,
+    });
+
     const addInto = (t: ModelTotals) => {
-      if (ocTokens) {
-        // OpenCode's normalised shape: { input, output, reasoning,
-        // cache: { read, write } }. Reasoning tokens are counted as
-        // output for pricing (OpenAI bills them at the output rate, and
-        // Anthropic folds them into output_tokens at wire time).
-        const cache = (ocTokens.cache && typeof ocTokens.cache === "object") ? ocTokens.cache : {};
-        t.inputTokens        += ocTokens.input ?? 0;
-        t.outputTokens       += (ocTokens.output ?? 0) + (ocTokens.reasoning ?? 0);
-        t.cacheReadTokens    += cache.read ?? 0;
-        t.cacheCreationTokens += cache.write ?? 0;
-      } else if (provider === "anthropic") {
-        t.inputTokens        += usage.input_tokens ?? 0;
-        t.outputTokens       += usage.output_tokens ?? 0;
-        t.cacheReadTokens    += usage.cache_read_input_tokens ?? 0;
-        t.cacheCreationTokens += usage.cache_creation_input_tokens ?? 0;
-      } else if (provider === "openai") {
-        const totalInput = usage.input_tokens ?? usage.prompt_tokens ?? 0;
-        const cached = usage.input_tokens_details?.cached_tokens ?? usage.cached_tokens ?? 0;
-        t.inputTokens     += Math.max(0, totalInput - cached);
-        t.cacheReadTokens += cached;
-        t.outputTokens    += usage.output_tokens ?? usage.completion_tokens ?? 0;
-      } else if (provider === "google") {
-        t.inputTokens     += usage.input ?? usage.input_tokens ?? usage.prompt_tokens ?? 0;
-        t.outputTokens    += usage.output ?? usage.output_tokens ?? usage.completion_tokens ?? 0;
-        t.cacheReadTokens += usage.cached ?? usage.cached_tokens ?? 0;
-      } else if (provider === "mistral") {
-        t.inputTokens     += usage.prompt_tokens ?? usage.input_tokens ?? usage.input ?? 0;
-        t.outputTokens    += usage.completion_tokens ?? usage.output_tokens ?? usage.output ?? 0;
-        t.cacheReadTokens += usage.cached_tokens ?? usage.cache_read_input_tokens ?? usage.cached ?? 0;
-      } else {
-        // Unknown provider — permissive union so a new upstream doesn't
-        // silently zero usage until we ship a mapping.
-        t.inputTokens        += usage.input_tokens ?? usage.prompt_tokens ?? usage.input ?? 0;
-        t.outputTokens       += usage.output_tokens ?? usage.completion_tokens ?? usage.output ?? 0;
-        t.cacheReadTokens    += usage.cache_read_input_tokens ?? usage.cached_tokens ?? usage.cached ?? 0;
-        t.cacheCreationTokens += usage.cache_creation_input_tokens ?? 0;
-      }
+      t.inputTokens        += inTok;
+      t.outputTokens       += outTok;
+      t.cacheReadTokens    += crTok;
+      t.cacheCreationTokens += cwTok;
       t.messageCount++;
     };
 
@@ -2180,4 +2258,5 @@ if (invokedAs && (invokedAs.endsWith("/subfit-ai.ts") || invokedAs.endsWith("/su
 }
 
 export { parseArgs, FALLBACK_CONFIG, verdict5h, findBestFit, classifyPlans, MARGIN_THRESHOLD };
+// sortEvents and ScanEvent are exported at their definitions in this file.
 export type { BestFitRecommendation, PlanStatus, ScanContext, ModelTotals };

@@ -77,7 +77,7 @@ describe("scanCodexSession", () => {
   const freshCtx = (): ScanContext => ({
     byModel: new Map(),
     byMonth: new Map(),
-    minTs: null, maxTs: null,
+    minTs: null, maxTs: null, events: [],
     totalLines: 0, assistantLines: 0, withUsage: 0, parseErrors: 0,
     unknownClaudeModels: new Set(),
     unknownGeminiModels: new Set(),
